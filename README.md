@@ -62,6 +62,42 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/test-audit` - **ADMIN ONLY** - Test audit system functionality
 - `/repair-audit` - **ADMIN ONLY** - Repair/reset the audit system
 
+### User Management
+- `/map-user @user asana_user_id` - **ADMIN ONLY** - Map a Discord user to an Asana user for task assignment
+- `/unmap-user @user` - **ADMIN ONLY** - Remove a Discord user's Asana mapping
+- `/list-mappings` - **ADMIN ONLY** - List all Discord-Asana user mappings
+
+## User Mapping System
+
+Botsana includes an intelligent user mapping system that connects Discord users to Asana users, enabling seamless task assignment and collaboration.
+
+### How It Works
+
+1. **Setup**: Administrators map Discord users to Asana users using `/map-user @user asana_user_id`
+2. **Auto-Assignment**: When you create a task without specifying an assignee, it automatically assigns to your Asana account (if mapped)
+3. **Mention Assignment**: You can @mention Discord users in task creation to assign tasks directly to their Asana accounts
+
+### Example Usage
+
+```
+/create-task name="Fix the login bug" assignee:@developer
+```
+
+This will create a task and assign it to the Asana user mapped to `@developer` in Discord.
+
+If you create a task without specifying an assignee:
+```
+/create-task name="Review the new feature"
+```
+
+It will automatically assign the task to your Asana account (assuming you've been mapped by an admin).
+
+### Finding Asana User IDs
+
+To find a user's Asana ID:
+1. Go to their Asana profile
+2. The ID is in the URL: `https://app.asana.com/1/1234567890/USER_ID`
+
 ## Audit System
 
 The Botsana audit system provides **real-time monitoring of ALL Asana activity** through webhooks and automated reporting.

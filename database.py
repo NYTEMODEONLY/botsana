@@ -25,6 +25,7 @@ class Guild(Base):
     # Relationships
     configs = relationship("GuildConfig", back_populates="guild", cascade="all, delete-orphan")
     error_logs = relationship("ErrorLog", back_populates="guild", cascade="all, delete-orphan")
+    user_mappings = relationship("UserMapping", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -72,6 +73,25 @@ class GlobalConfig(Base):
     value = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class UserMapping(Base):
+    """Maps Discord users to Asana users for task assignment."""
+    __tablename__ = 'user_mappings'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    discord_user_id = Column(BigInteger, nullable=False)  # Discord user ID (snowflake)
+    asana_user_id = Column(String(255), nullable=False)  # Asana user ID/GID
+    discord_username = Column(String(255))  # Store username for reference
+    asana_user_name = Column(String(255))  # Store Asana user name for reference
+    created_by = Column(BigInteger, nullable=False)  # Discord user who created this mapping
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="user_mappings")
+
+    __table_args__ = {'sqlite_autoincrement': True}
 
 class BotStats(Base):
     """Bot usage statistics."""
@@ -143,6 +163,100 @@ class DatabaseManager:
                 session.add(guild)
                 session.commit()
             return guild
+
+    def get_user_mapping(self, guild_id: int, discord_user_id: int) -> Optional[Dict[str, Any]]:
+        """Get the Asana user mapping for a Discord user."""
+        with self.get_session() as session:
+            mapping = session.query(UserMapping).filter(
+                UserMapping.guild_id == guild_id,
+                UserMapping.discord_user_id == discord_user_id
+            ).first()
+
+            if mapping:
+                return {
+                    'id': mapping.id,
+                    'guild_id': mapping.guild_id,
+                    'discord_user_id': mapping.discord_user_id,
+                    'asana_user_id': mapping.asana_user_id,
+                    'discord_username': mapping.discord_username,
+                    'asana_user_name': mapping.asana_user_name,
+                    'created_by': mapping.created_by,
+                    'created_at': mapping.created_at,
+                    'updated_at': mapping.updated_at
+                }
+            return None
+
+    def set_user_mapping(self, guild_id: int, discord_user_id: int, asana_user_id: str,
+                        discord_username: str = None, asana_user_name: str = None,
+                        created_by: int = None) -> bool:
+        """Create or update a user mapping."""
+        try:
+            with self.get_session() as session:
+                # Ensure guild exists
+                self.ensure_guild_exists(guild_id)
+
+                # Check if mapping already exists
+                existing = session.query(UserMapping).filter(
+                    UserMapping.guild_id == guild_id,
+                    UserMapping.discord_user_id == discord_user_id
+                ).first()
+
+                if existing:
+                    # Update existing mapping
+                    existing.asana_user_id = asana_user_id
+                    existing.discord_username = discord_username
+                    existing.asana_user_name = asana_user_name
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    # Create new mapping
+                    mapping = UserMapping(
+                        guild_id=guild_id,
+                        discord_user_id=discord_user_id,
+                        asana_user_id=asana_user_id,
+                        discord_username=discord_username,
+                        asana_user_name=asana_user_name,
+                        created_by=created_by
+                    )
+                    session.add(mapping)
+
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error setting user mapping: {e}")
+            return False
+
+    def remove_user_mapping(self, guild_id: int, discord_user_id: int) -> bool:
+        """Remove a user mapping."""
+        try:
+            with self.get_session() as session:
+                mapping = session.query(UserMapping).filter(
+                    UserMapping.guild_id == guild_id,
+                    UserMapping.discord_user_id == discord_user_id
+                ).first()
+
+                if mapping:
+                    session.delete(mapping)
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error removing user mapping: {e}")
+            return False
+
+    def list_user_mappings(self, guild_id: int) -> list:
+        """List all user mappings for a guild."""
+        with self.get_session() as session:
+            mappings = session.query(UserMapping).filter(UserMapping.guild_id == guild_id).all()
+
+            return [{
+                'id': m.id,
+                'discord_user_id': m.discord_user_id,
+                'discord_username': m.discord_username,
+                'asana_user_id': m.asana_user_id,
+                'asana_user_name': m.asana_user_name,
+                'created_by': m.created_by,
+                'created_at': m.created_at
+            } for m in mappings]
 
 # Global database manager instance
 db_manager = DatabaseManager()

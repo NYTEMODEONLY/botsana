@@ -615,7 +615,7 @@ def handle_asana_error(error: Exception) -> str:
 @app_commands.describe(
     name="Task name (required)",
     project="Project ID (optional, uses default if not specified)",
-    assignee="Assignee email or ID (optional)",
+    assignee="Discord user to assign task to (optional, auto-assigns to you if not specified)",
     due_date="Due date in YYYY-MM-DD format (optional)",
     notes="Task notes/description (optional)"
 )
@@ -623,7 +623,7 @@ async def create_task_command(
     interaction: discord.Interaction,
     name: str,
     project: Optional[str] = None,
-    assignee: Optional[str] = None,
+    assignee: Optional[discord.Member] = None,
     due_date: Optional[str] = None,
     notes: Optional[str] = None
 ):
@@ -631,10 +631,43 @@ async def create_task_command(
     await interaction.response.defer()
 
     try:
+        # Resolve assignee - handle Discord user mentions and auto-assignment
+        asana_assignee = None
+        assignee_info = None
+
+        if assignee:
+            # User specified a Discord user - look up their Asana mapping
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
+            if user_mapping:
+                asana_assignee = user_mapping['asana_user_id']
+                assignee_info = f"{assignee.mention} → Asana user `{user_mapping['asana_user_name'] or user_mapping['asana_user_id']}`"
+            else:
+                # No mapping found for the mentioned user
+                embed = discord.Embed(
+                    title="❌ User Not Mapped",
+                    description=f"{assignee.mention} is not mapped to an Asana user. An administrator needs to run `/map-user` first.",
+                    color=discord.Color.red()
+                )
+                embed.add_field(
+                    name="How to Map Users",
+                    value=f"Use `/map-user @{assignee.name} asana_user_id` to create the mapping.",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed)
+                return
+        else:
+            # No assignee specified - auto-assign to task creator
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            if user_mapping:
+                asana_assignee = user_mapping['asana_user_id']
+                assignee_info = f"Auto-assigned to {interaction.user.mention} → Asana user `{user_mapping['asana_user_name'] or user_mapping['asana_user_id']}`"
+            else:
+                assignee_info = "No assignee (user not mapped to Asana)"
+
         task = await asana_manager.create_task(
             name=name,
             project_id=project,
-            assignee=assignee,
+            assignee=asana_assignee,
             due_date=due_date,
             notes=notes,
             guild_id=interaction.guild.id
@@ -657,7 +690,14 @@ async def create_task_command(
             embed.add_field(name="📁 Project", value="Default project", inline=True)
 
         if task.get('assignee'):
-            embed.add_field(name="👤 Assignee", value=task['assignee']['name'], inline=True)
+            asana_assignee_name = task['assignee']['name']
+            assignee_display = f"{asana_assignee_name}"
+            if assignee_info and "Auto-assigned" in assignee_info:
+                assignee_display += " (Auto-assigned)"
+            embed.add_field(name="👤 Assignee", value=assignee_display, inline=True)
+        elif assignee_info:
+            # Show Discord mapping info even if Asana doesn't return assignee data
+            embed.add_field(name="👤 Assignee Info", value=assignee_info, inline=False)
 
         if task.get('due_on'):
             embed.add_field(name="📅 Due Date", value=task['due_on'], inline=False)
@@ -1519,6 +1559,215 @@ async def repair_audit_error(interaction: discord.Interaction, error):
             await interaction.followup.send(embed=embed)
     else:
         logger.error(f"Repair audit error: {error}")
+
+@bot.tree.command(name="map-user", description="Map a Discord user to an Asana user for task assignment")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def map_user_command(
+    interaction: discord.Interaction,
+    discord_user: discord.Member,
+    asana_user_id: str,
+    asana_user_name: Optional[str] = None
+):
+    """Map a Discord user to an Asana user for automatic task assignment."""
+    await interaction.response.defer()
+
+    try:
+        # Set the user mapping
+        success = db_manager.set_user_mapping(
+            guild_id=interaction.guild.id,
+            discord_user_id=discord_user.id,
+            asana_user_id=asana_user_id,
+            discord_username=str(discord_user),
+            asana_user_name=asana_user_name,
+            created_by=interaction.user.id
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ User Mapping Created",
+                description=f"Successfully mapped {discord_user.mention} to Asana user `{asana_user_name or asana_user_id}`",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="Discord User",
+                value=f"{discord_user.mention}\n`{discord_user.id}`",
+                inline=True
+            )
+
+            embed.add_field(
+                name="Asana User",
+                value=f"`{asana_user_name or 'Unknown'}`\nID: `{asana_user_id}`",
+                inline=True
+            )
+
+            embed.set_footer(text="Tasks created by this user will now auto-assign to their Asana account")
+        else:
+            embed = discord.Embed(
+                title="❌ Mapping Failed",
+                description="Failed to create user mapping. Please check the Asana user ID and try again.",
+                color=discord.Color.red()
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "map-user")
+
+        embed = discord.Embed(
+            title="❌ Mapping Failed",
+            description=f"An error occurred while creating the user mapping: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@map_user_command.error
+async def map_user_error(interaction: discord.Interaction, error):
+    """Handle map user command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to map users.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Map user error: {error}")
+
+@bot.tree.command(name="unmap-user", description="Remove a Discord user's Asana mapping")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def unmap_user_command(interaction: discord.Interaction, discord_user: discord.Member):
+    """Remove a Discord user's Asana mapping."""
+    await interaction.response.defer()
+
+    try:
+        success = db_manager.remove_user_mapping(interaction.guild.id, discord_user.id)
+
+        if success:
+            embed = discord.Embed(
+                title="✅ User Mapping Removed",
+                description=f"Successfully removed Asana mapping for {discord_user.mention}",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="Discord User",
+                value=f"{discord_user.mention}\n`{discord_user.id}`",
+                inline=True
+            )
+
+            embed.set_footer(text="This user will no longer have automatic task assignment")
+        else:
+            embed = discord.Embed(
+                title="⚠️ No Mapping Found",
+                description=f"No Asana mapping found for {discord_user.mention}",
+                color=discord.Color.yellow()
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "unmap-user")
+
+        embed = discord.Embed(
+            title="❌ Unmapping Failed",
+            description=f"An error occurred while removing the user mapping: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@unmap_user_command.error
+async def unmap_user_error(interaction: discord.Interaction, error):
+    """Handle unmap user command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to unmap users.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Unmap user error: {error}")
+
+@bot.tree.command(name="list-mappings", description="List all Discord-Asana user mappings")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def list_mappings_command(interaction: discord.Interaction):
+    """List all user mappings for this server."""
+    await interaction.response.defer()
+
+    try:
+        mappings = db_manager.list_user_mappings(interaction.guild.id)
+
+        if not mappings:
+            embed = discord.Embed(
+                title="📋 User Mappings",
+                description="No user mappings have been configured for this server.",
+                color=discord.Color.blue()
+            )
+
+            embed.add_field(
+                name="How to Add Mappings",
+                value="Use `/map-user @user asana_user_id` to map Discord users to Asana users.",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title="📋 User Mappings",
+            description=f"Found {len(mappings)} user mapping(s) for this server.",
+            color=discord.Color.blue()
+        )
+
+        for i, mapping in enumerate(mappings, 1):
+            # Try to get the Discord user object
+            discord_user = interaction.guild.get_member(mapping['discord_user_id'])
+            user_mention = discord_user.mention if discord_user else f"Unknown User ({mapping['discord_user_id']})"
+
+            mapping_info = f"**Discord:** {user_mention}\n**Asana:** `{mapping['asana_user_name'] or 'Unknown'}`\n**ID:** `{mapping['asana_user_id']}`"
+
+            embed.add_field(
+                name=f"Mapping {i}",
+                value=mapping_info,
+                inline=True
+            )
+
+        embed.set_footer(text="These mappings enable automatic task assignment")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "list-mappings")
+
+        embed = discord.Embed(
+            title="❌ Failed to List Mappings",
+            description=f"An error occurred while listing user mappings: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@list_mappings_command.error
+async def list_mappings_error(interaction: discord.Interaction, error):
+    """Handle list mappings command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to list user mappings.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"List mappings error: {error}")
 
 @bot.tree.command(name="status", description="Check Botsana's comprehensive system status")
 async def status_command(interaction: discord.Interaction):
