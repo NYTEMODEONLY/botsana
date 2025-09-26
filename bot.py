@@ -268,7 +268,7 @@ class AuditManager:
 
         return category
 
-    async def register_webhooks(self, base_url: str):
+    async def register_webhooks(self, base_url: str) -> bool:
         """Register Asana webhooks for the workspace."""
         webhook_url = f"{base_url}/webhook"
 
@@ -287,9 +287,11 @@ class AuditManager:
         try:
             result = asana_client.webhooks.create_webhook(webhook_data)
             self.webhooks.append(result)
-            logger.info(f"Registered webhook: {result['gid']}")
+            logger.info(f"Registered webhook: {result['gid']} for URL: {webhook_url}")
+            return True
         except Exception as e:
             logger.error(f"Failed to register webhook: {e}")
+            return False
 
     async def send_audit_embed(self, channel_name: str, embed: discord.Embed):
         """Send an embed to a specific audit channel."""
@@ -617,14 +619,31 @@ async def create_task_command(
         embed = discord.Embed(
             title="✅ Task Created",
             description=f"**{task['name']}**",
-            color=discord.Color.green()
+            color=discord.Color.green(),
+            timestamp=datetime.now()
         )
 
-        embed.add_field(name="Task ID", value=task['gid'], inline=True)
-        if task.get('due_on'):
-            embed.add_field(name="Due Date", value=task['due_on'], inline=True)
+        embed.add_field(name="📋 Task ID", value=f"`{task['gid']}`", inline=True)
+
+        # Show project information
+        if task.get('projects') and len(task['projects']) > 0:
+            project_names = [p['name'] for p in task['projects']]
+            embed.add_field(name="📁 Project", value=", ".join(project_names), inline=True)
+        else:
+            embed.add_field(name="📁 Project", value="Default project", inline=True)
+
         if task.get('assignee'):
-            embed.add_field(name="Assignee", value=task['assignee']['name'], inline=True)
+            embed.add_field(name="👤 Assignee", value=task['assignee']['name'], inline=True)
+
+        if task.get('due_on'):
+            embed.add_field(name="📅 Due Date", value=task['due_on'], inline=False)
+
+        if task.get('notes'):
+            # Truncate notes if too long
+            notes = task['notes'][:200] + "..." if len(task['notes']) > 200 else task['notes']
+            embed.add_field(name="📝 Notes", value=notes, inline=False)
+
+        embed.set_footer(text=f"Created via Botsana • Task ID: {task['gid']}")
 
         await interaction.followup.send(embed=embed)
 
@@ -943,7 +962,25 @@ async def audit_setup_command(interaction: discord.Interaction):
 
         # Register webhooks
         base_url = os.getenv('HEROKU_URL', f"https://{os.getenv('HEROKU_APP_NAME', 'botsana-discord-bot')}.herokuapp.com")
-        await audit_manager.register_webhooks(base_url)
+        embed.add_field(
+            name="🔗 Webhook Setup",
+            value=f"Registering webhooks at {base_url}/webhook",
+            inline=False
+        )
+
+        webhook_result = await audit_manager.register_webhooks(base_url)
+        if webhook_result:
+            embed.add_field(
+                name="✅ Webhooks",
+                value=f"Registered {len(audit_manager.webhooks)} webhook(s)",
+                inline=True
+            )
+        else:
+            embed.add_field(
+                name="⚠️ Webhooks",
+                value="Failed to register webhooks",
+                inline=True
+            )
 
         # Start periodic tasks
         scheduler.add_job(audit_manager.check_missed_deadlines, 'cron', hour=9, minute=0)  # Daily at 9 AM
@@ -1265,6 +1302,102 @@ async def view_error_logs_error(interaction: discord.Interaction, error):
             await interaction.followup.send(embed=embed)
     else:
         logger.error(f"View error logs error: {error}")
+
+@bot.tree.command(name="test-audit", description="Test the audit system by sending a test message")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def test_audit_command(interaction: discord.Interaction):
+    """Test the audit system by sending a test message to all audit channels."""
+    await interaction.response.defer()
+
+    try:
+        embed = discord.Embed(
+            title="🧪 Audit System Test",
+            description="Testing Botsana audit channels...",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        embed.add_field(
+            name="👤 Tester",
+            value=interaction.user.mention,
+            inline=True
+        )
+
+        embed.add_field(
+            name="🏠 Server",
+            value=interaction.guild.name,
+            inline=True
+        )
+
+        embed.add_field(
+            name="⏰ Time",
+            value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            inline=True
+        )
+
+        # Test each audit channel
+        test_results = {}
+        for channel_name, description in AUDIT_CHANNELS.items():
+            try:
+                success = await audit_manager.send_audit_embed(channel_name, embed)
+                test_results[channel_name] = "✅" if success else "❌"
+            except Exception as e:
+                test_results[channel_name] = f"❌ ({str(e)[:20]}...)"
+
+        # Create results summary
+        result_embed = discord.Embed(
+            title="🧪 Audit Test Results",
+            color=discord.Color.green(),
+            timestamp=datetime.now()
+        )
+
+        results_text = ""
+        for channel_name, result in test_results.items():
+            results_text += f"• `{channel_name}`: {result}\n"
+
+        result_embed.add_field(
+            name="📺 Channel Tests",
+            value=results_text,
+            inline=False
+        )
+
+        # Check webhook status
+        webhook_count = len(audit_manager.webhooks) if hasattr(audit_manager, 'webhooks') else 0
+        result_embed.add_field(
+            name="🔗 Webhook Status",
+            value=f"Registered: {webhook_count} webhook(s)",
+            inline=True
+        )
+
+        result_embed.set_footer(text="Audit system test completed")
+
+        await interaction.followup.send(embed=result_embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "test-audit")
+
+        embed = discord.Embed(
+            title="❌ Audit Test Failed",
+            description=f"Failed to test audit system: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@test_audit_command.error
+async def test_audit_error(interaction: discord.Interaction, error):
+    """Handle test audit command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to test the audit system.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Test audit error: {error}")
 
 @bot.tree.command(name="status", description="Check Botsana's comprehensive system status")
 async def status_command(interaction: discord.Interaction):
