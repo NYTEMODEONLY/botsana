@@ -72,6 +72,13 @@ Botsana is a minimal, powerful Discord-Asana integration bot that makes task man
 
 ## 🧠 **PHASE 4 - AI-Powered Intelligence (v3.0-v3.5)**
 
+### Natural Language Interface
+- [ ] **Conversational Commands**: Chat channel for natural language task management
+- [ ] **Intent Recognition**: AI-powered understanding of user requests
+- [ ] **Smart Execution**: Automatic mapping of natural language to bot actions
+- [ ] **Action Auditing**: Detailed logs of AI interpretation and execution
+- [ ] **Context Awareness**: Remember recent tasks and user preferences
+
 ### Smart Task Creation
 - [ ] **Natural Language Processing**: Create tasks from plain English descriptions
 - [ ] **Task Breakdown**: Automatically split complex tasks into subtasks
@@ -161,9 +168,10 @@ Botsana is a minimal, powerful Discord-Asana integration bot that makes task man
 ## 🎯 **CURRENT PRIORITIES (Next 3 Months)**
 
 ### Immediate Focus (v1.1)
-1. **Bulk Task Operations** - Select and act on multiple tasks
-2. **Enhanced Notifications** - Due date and assignment alerts
-3. **Task Templates** - Reusable task configurations
+1. **Natural Language Interface** ⭐ **NEW HIGH PRIORITY** - AI-powered conversational task management
+2. **Bulk Task Operations** - Select and act on multiple tasks
+3. **Enhanced Notifications** - Due date and assignment alerts
+4. **Task Templates** - Reusable task configurations
 
 ### Short Term (v1.5)
 1. **Advanced Search** - Filter and save task searches
