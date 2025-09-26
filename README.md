@@ -51,6 +51,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/list-tasks project:"Project ID"` - List tasks in a project
 - `/delete-task id:12345` - Delete a task
 - `/view-task id:12345` - View task details
+- `/status` - Check comprehensive bot health and status
 - `/help` - Show all commands
 
 ### Audit System Setup
@@ -132,6 +133,26 @@ Botsana uses **PostgreSQL database** for persistent storage that survives Heroku
 - Suitable for most Discord bots with moderate usage
 
 **All configuration and logs persist through restarts, deployments, and crashes.**
+
+### Status Command Features
+
+The `/status` command provides comprehensive system health information:
+
+#### Status Checks:
+- **Bot Status** - Online/responding confirmation
+- **Discord Connection** - Gateway latency and connection health
+- **Asana API** - Authentication and API connectivity
+- **Database** - PostgreSQL connection and health
+- **Audit System** - Configuration and channel status
+- **Error Statistics** - Recent error counts and trends
+- **Bot Statistics** - Server and user counts
+- **System Info** - Python version and library versions
+
+#### Use Cases:
+- Quick health check after deployments
+- Troubleshooting connectivity issues
+- Monitoring system performance
+- Verifying configuration changes
 
 ## Heroku Deployment
 

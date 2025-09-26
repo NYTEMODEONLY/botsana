@@ -1265,6 +1265,183 @@ async def view_error_logs_error(interaction: discord.Interaction, error):
     else:
         logger.error(f"View error logs error: {error}")
 
+@bot.tree.command(name="status", description="Check Botsana's comprehensive system status")
+async def status_command(interaction: discord.Interaction):
+    """Display comprehensive bot status and health information."""
+    await interaction.response.defer()
+
+    try:
+        embed = discord.Embed(
+            title="🤖 Botsana System Status",
+            description="Comprehensive health check and system information",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        # Bot Information
+        embed.add_field(
+            name="🤖 Bot Status",
+            value="✅ Online and responding",
+            inline=True
+        )
+
+        embed.add_field(
+            name="🏠 Guild",
+            value=f"{interaction.guild.name} ({interaction.guild.id})",
+            inline=True
+        )
+
+        # Discord Connection
+        latency = round(bot.latency * 1000, 2) if bot.latency else "Unknown"
+        embed.add_field(
+            name="🌐 Discord Connection",
+            value=f"✅ Connected\n📡 Latency: {latency}ms",
+            inline=True
+        )
+
+        # Asana Connection Test
+        asana_status = await test_asana_connection()
+        embed.add_field(
+            name="📋 Asana API",
+            value=asana_status,
+            inline=True
+        )
+
+        # Database Connection Test
+        db_status = await test_database_connection()
+        embed.add_field(
+            name="🗄️ Database",
+            value=db_status,
+            inline=True
+        )
+
+        # Audit System Status
+        audit_status = await get_audit_system_status(interaction.guild.id)
+        embed.add_field(
+            name="📊 Audit System",
+            value=audit_status,
+            inline=True
+        )
+
+        # Error Statistics
+        error_stats = await get_error_statistics(interaction.guild.id)
+        embed.add_field(
+            name="🚨 Recent Errors",
+            value=error_stats,
+            inline=False
+        )
+
+        # Bot Statistics
+        bot_stats = await get_bot_statistics()
+        embed.add_field(
+            name="📈 Bot Statistics",
+            value=bot_stats,
+            inline=False
+        )
+
+        # System Information
+        system_info = get_system_info()
+        embed.add_field(
+            name="⚙️ System Info",
+            value=system_info,
+            inline=False
+        )
+
+        embed.set_footer(text="Botsana Health Check | Use /help for command list")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        # Fallback status if something goes wrong
+        error_embed = discord.Embed(
+            title="❌ Status Check Failed",
+            description=f"Unable to perform full status check: {str(e)}",
+            color=discord.Color.red()
+        )
+
+        # At least show we're online
+        error_embed.add_field(
+            name="🤖 Bot Status",
+            value="✅ Bot is responding",
+            inline=True
+        )
+
+        await interaction.followup.send(embed=error_embed)
+
+async def test_asana_connection() -> str:
+    """Test connection to Asana API."""
+    try:
+        # Try to get user info to test API connection
+        user_info = asana_client.users.get_user('me')
+        return f"✅ Connected\n👤 {user_info['name']}"
+    except Exception as e:
+        return f"❌ Connection Failed\n💬 {str(e)[:50]}..."
+
+async def test_database_connection() -> str:
+    """Test database connection."""
+    try:
+        with db_manager.get_session() as session:
+            # Simple query to test connection
+            result = session.execute("SELECT 1").scalar()
+            return "✅ Connected"
+    except Exception as e:
+        return f"❌ Connection Failed\n💬 {str(e)[:50]}..."
+
+async def get_audit_system_status(guild_id: int) -> str:
+    """Get audit system status for the guild."""
+    try:
+        audit_channel_id = bot_config.get_audit_log_channel(guild_id)
+        if audit_channel_id:
+            audit_channel = bot.get_channel(audit_channel_id)
+            if audit_channel:
+                return f"✅ Configured\n📺 {audit_channel.mention}"
+            else:
+                return "⚠️ Channel not found"
+        else:
+            return "❌ Not configured\n💡 Use `/set-audit-log`"
+    except Exception as e:
+        return f"❌ Error: {str(e)[:30]}..."
+
+async def get_error_statistics(guild_id: int) -> str:
+    """Get recent error statistics for the guild."""
+    try:
+        with db_manager.get_session() as session:
+            # Get error count from last 24 hours
+            yesterday = datetime.now() - timedelta(days=1)
+            error_count = session.query(db_manager.ErrorLog).filter(
+                db_manager.ErrorLog.guild_id == guild_id,
+                db_manager.ErrorLog.created_at >= yesterday
+            ).count()
+
+            if error_count == 0:
+                return "✅ No errors in last 24h"
+            elif error_count == 1:
+                return "⚠️ 1 error in last 24h"
+            else:
+                return f"⚠️ {error_count} errors in last 24h"
+    except Exception as e:
+        return f"❌ Unable to check: {str(e)[:30]}..."
+
+async def get_bot_statistics() -> str:
+    """Get general bot statistics."""
+    try:
+        guild_count = len(bot.guilds)
+        user_count = sum(len(guild.members) for guild in bot.guilds)
+
+        return f"🏠 {guild_count} servers\n👥 {user_count} users"
+    except Exception as e:
+        return f"❌ Unable to get stats: {str(e)[:30]}..."
+
+def get_system_info() -> str:
+    """Get system information."""
+    try:
+        import platform
+        python_version = platform.python_version()
+
+        return f"🐍 Python {python_version}\n⚡ discord.py {discord.__version__}"
+    except Exception:
+        return "ℹ️ System info unavailable"
+
 async def main():
     """Main function to run the bot."""
     global error_logger
