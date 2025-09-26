@@ -162,18 +162,16 @@ class AsanaManager:
 
             if project_id:
                 # List tasks in a specific project
-                result = self.client.tasks.get_tasks_for_project(project_id, {'opt_fields': 'name,due_on,assignee.name,completed,notes'})
+                result = self.client.tasks.get_tasks_for_project(project_id, opt_fields='name,due_on,assignee.name,completed,notes')
                 tasks = list(result)
             elif assignee:
                 # List tasks assigned to a user
-                result = self.client.tasks.get_tasks_for_user(assignee, workspace=self.workspace_id,
-                                                            {'opt_fields': 'name,due_on,assignee.name,completed,notes,projects.name'})
+                result = self.client.tasks.get_tasks_for_user(assignee, workspace=self.workspace_id, opt_fields='name,due_on,assignee.name,completed,notes,projects.name')
                 tasks = list(result)
             else:
                 # List all tasks in workspace (limited)
                 if self.default_project_id:
-                    result = self.client.tasks.get_tasks_for_project(self.default_project_id,
-                                                                   {'opt_fields': 'name,due_on,assignee.name,completed,notes'})
+                    result = self.client.tasks.get_tasks_for_project(self.default_project_id, opt_fields='name,due_on,assignee.name,completed,notes')
                     tasks = list(result)
                 else:
                     raise ValueError("No project or assignee specified, and no default project set")
@@ -201,7 +199,7 @@ class AsanaManager:
         """Get a specific task by ID."""
         try:
             # Get the task with detailed information
-            result = self.client.tasks.get_task(task_id, {'opt_fields': 'name,due_on,assignee.name,completed,notes,projects.name'})
+            result = self.client.tasks.get_task(task_id, opt_fields='name,due_on,assignee.name,completed,notes,projects.name')
             logger.info(f"Retrieved task: {task_id}")
             return result
 
