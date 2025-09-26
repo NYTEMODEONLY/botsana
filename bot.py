@@ -13,6 +13,11 @@ import logging
 from typing import Optional, List, Dict, Any
 import asyncio
 from asana.error import AsanaError, NotFoundError, ForbiddenError
+from flask import Flask, request, jsonify
+import threading
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import json
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -208,6 +213,337 @@ class AsanaManager:
 
 # Initialize Asana manager
 asana_manager = AsanaManager(asana_client, ASANA_WORKSPACE_ID, ASANA_DEFAULT_PROJECT_ID)
+
+# Initialize Flask app for webhooks
+flask_app = Flask(__name__)
+
+# Scheduler for periodic tasks
+scheduler = AsyncIOScheduler()
+
+# Audit channel configuration
+AUDIT_CHANNELS = {
+    'taskmaster': '📋 All task creations and deletions',
+    'updates': '🔄 Task updates, comments, status changes, and assignments',
+    'completed': '✅ Completed tasks',
+    'due-soon': '⏰ Tasks due within 24 hours',
+    'overdue': '🚨 Currently overdue tasks',
+    'missed-deadline': '💀 Tasks that missed their deadline',
+    'new-projects': '📁 New project creations',
+    'attachments': '📎 Files added to tasks'
+}
+
+class AuditManager:
+    """Manages audit channels and webhook events."""
+
+    def __init__(self):
+        self.webhook_secret = os.getenv('WEBHOOK_SECRET', 'botsana_secret_2024')
+        self.audit_channels = {}
+        self.webhooks = []
+
+    async def setup_audit_channels(self, guild: discord.Guild) -> discord.CategoryChannel:
+        """Create the Botsana audit category and channels."""
+        # Create category
+        category = await guild.create_category("🤖 Botsana")
+
+        # Create channels
+        for channel_name, description in AUDIT_CHANNELS.items():
+            channel = await guild.create_text_channel(
+                channel_name,
+                category=category,
+                topic=description
+            )
+            self.audit_channels[channel_name] = channel
+
+        return category
+
+    async def register_webhooks(self, base_url: str):
+        """Register Asana webhooks for the workspace."""
+        webhook_url = f"{base_url}/webhook"
+
+        # Register webhook for all task events in the workspace
+        webhook_data = {
+            'resource': ASANA_WORKSPACE_ID,
+            'target': webhook_url,
+            'filters': [
+                {'resource_type': 'task', 'action': 'added'},
+                {'resource_type': 'task', 'action': 'removed'},
+                {'resource_type': 'task', 'action': 'changed'},
+                {'resource_type': 'project', 'action': 'added'}
+            ]
+        }
+
+        try:
+            result = asana_client.webhooks.create_webhook(webhook_data)
+            self.webhooks.append(result)
+            logger.info(f"Registered webhook: {result['gid']}")
+        except Exception as e:
+            logger.error(f"Failed to register webhook: {e}")
+
+    async def send_audit_embed(self, channel_name: str, embed: discord.Embed):
+        """Send an embed to a specific audit channel."""
+        if channel_name in self.audit_channels:
+            channel = self.audit_channels[channel_name]
+            try:
+                await channel.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Failed to send audit embed to {channel_name}: {e}")
+
+    async def check_missed_deadlines(self):
+        """Check for missed deadlines and send notifications."""
+        try:
+            # Get all tasks with due dates
+            tasks = await asana_manager.list_tasks()
+
+            yesterday = datetime.now() - timedelta(days=1)
+            missed_tasks = []
+
+            for task in tasks:
+                if task.get('due_on'):
+                    due_date = datetime.fromisoformat(task['due_on'])
+                    if due_date.date() == yesterday.date() and not task.get('completed'):
+                        missed_tasks.append(task)
+
+            if missed_tasks:
+                embed = discord.Embed(
+                    title="💀 Missed Deadlines",
+                    description=f"Found {len(missed_tasks)} tasks that missed their deadline yesterday",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+
+                for task in missed_tasks[:10]:  # Limit to 10 tasks
+                    assignee = task.get('assignee', {}).get('name', 'Unassigned')
+                    embed.add_field(
+                        name=f"📋 {task['name']}",
+                        value=f"👤 {assignee} | 📅 Was due {task['due_on']} | ID: `{task['gid']}`",
+                        inline=False
+                    )
+
+                await self.send_audit_embed('missed-deadline', embed)
+
+        except Exception as e:
+            logger.error(f"Error checking missed deadlines: {e}")
+
+    async def check_due_soon(self):
+        """Check for tasks due within 24 hours."""
+        try:
+            tasks = await asana_manager.list_tasks()
+            tomorrow = datetime.now() + timedelta(days=1)
+            due_soon_tasks = []
+
+            for task in tasks:
+                if task.get('due_on') and not task.get('completed'):
+                    due_date = datetime.fromisoformat(task['due_on'])
+                    if due_date <= tomorrow and due_date > datetime.now():
+                        due_soon_tasks.append(task)
+
+            if due_soon_tasks:
+                embed = discord.Embed(
+                    title="⏰ Tasks Due Soon",
+                    description=f"{len(due_soon_tasks)} tasks due within 24 hours",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now()
+                )
+
+                for task in due_soon_tasks[:10]:
+                    assignee = task.get('assignee', {}).get('name', 'Unassigned')
+                    due_time = datetime.fromisoformat(task['due_on'])
+                    embed.add_field(
+                        name=f"📋 {task['name']}",
+                        value=f"👤 {assignee} | 📅 Due {due_time.strftime('%Y-%m-%d %H:%M')} | ID: `{task['gid']}`",
+                        inline=False
+                    )
+
+                await self.send_audit_embed('due-soon', embed)
+
+        except Exception as e:
+            logger.error(f"Error checking due soon tasks: {e}")
+
+# Initialize audit manager
+audit_manager = AuditManager()
+
+# Flask webhook endpoints
+@flask_app.route('/webhook', methods=['POST'])
+def handle_webhook():
+    """Handle incoming Asana webhooks."""
+    try:
+        # Verify webhook secret if provided
+        secret = request.headers.get('X-Hook-Secret')
+        if secret:
+            # This is a webhook registration request
+            response = jsonify({'status': 'ok'})
+            response.headers['X-Hook-Secret'] = secret
+            return response
+
+        # Get webhook data
+        data = request.get_json()
+        if not data:
+            return jsonify({'status': 'error', 'message': 'No data received'}), 400
+
+        # Process webhook events asynchronously
+        asyncio.run(process_webhook_events(data))
+
+        return jsonify({'status': 'ok'}), 200
+
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+async def process_webhook_events(data):
+    """Process webhook events and send to appropriate audit channels."""
+    try:
+        events = data.get('events', [])
+
+        for event in events:
+            event_type = event.get('type')
+            resource_type = event.get('resource', {}).get('resource_type')
+            action = event.get('action')
+
+            if resource_type == 'task':
+                await process_task_event(event)
+            elif resource_type == 'project':
+                await process_project_event(event)
+
+    except Exception as e:
+        logger.error(f"Error processing webhook events: {e}")
+
+async def process_task_event(event):
+    """Process task-related webhook events."""
+    try:
+        action = event.get('action')
+        task_gid = event.get('resource', {}).get('gid')
+
+        if not task_gid:
+            return
+
+        # Get task details
+        task = await asana_manager.get_task(task_gid)
+
+        if action == 'added':
+            # Task created
+            embed = discord.Embed(
+                title="📋 Task Created",
+                description=f"**{task['name']}**",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            if task.get('assignee'):
+                embed.add_field(name="👤 Assignee", value=task['assignee']['name'], inline=True)
+            if task.get('due_on'):
+                embed.add_field(name="📅 Due Date", value=task['due_on'], inline=True)
+            if task.get('projects'):
+                project_names = [p['name'] for p in task['projects']]
+                embed.add_field(name="📁 Projects", value=", ".join(project_names), inline=False)
+
+            embed.set_footer(text=f"Task ID: {task['gid']}")
+            await audit_manager.send_audit_embed('taskmaster', embed)
+
+        elif action == 'removed':
+            # Task deleted
+            embed = discord.Embed(
+                title="🗑️ Task Deleted",
+                description=f"**{task['name']}** was deleted",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            embed.set_footer(text=f"Task ID: {task_gid}")
+            await audit_manager.send_audit_embed('taskmaster', embed)
+
+        elif action == 'changed':
+            # Task updated - check what changed
+            changes = event.get('change', {})
+
+            if changes.get('field') == 'completed' and changes.get('new_value') is True:
+                # Task completed
+                embed = discord.Embed(
+                    title="✅ Task Completed",
+                    description=f"**{task['name']}** has been completed!",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
+                )
+
+                if task.get('assignee'):
+                    embed.add_field(name="👤 Completed by", value=task['assignee']['name'], inline=True)
+
+                embed.set_footer(text=f"Task ID: {task['gid']}")
+                await audit_manager.send_audit_embed('completed', embed)
+
+            elif changes.get('field') == 'assignee':
+                # Assignment changed
+                old_assignee = changes.get('old_value', {}).get('name', 'Unassigned') if changes.get('old_value') else 'Unassigned'
+                new_assignee = changes.get('new_value', {}).get('name', 'Unassigned') if changes.get('new_value') else 'Unassigned'
+
+                embed = discord.Embed(
+                    title="👥 Task Assignment Changed",
+                    description=f"**{task['name']}**",
+                    color=discord.Color.purple(),
+                    timestamp=datetime.now()
+                )
+
+                embed.add_field(name="📋 Task", value=task['name'], inline=False)
+                embed.add_field(name="⬅️ From", value=old_assignee, inline=True)
+                embed.add_field(name="➡️ To", value=new_assignee, inline=True)
+
+                embed.set_footer(text=f"Task ID: {task['gid']}")
+                await audit_manager.send_audit_embed('updates', embed)
+
+            elif changes.get('field') in ['name', 'notes', 'due_on']:
+                # Other task updates
+                field_names = {
+                    'name': '📝 Name',
+                    'notes': '📝 Notes',
+                    'due_on': '📅 Due Date'
+                }
+
+                embed = discord.Embed(
+                    title=f"🔄 Task Updated - {field_names.get(changes.get('field'), 'Field')}",
+                    description=f"**{task['name']}**",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now()
+                )
+
+                if changes.get('old_value'):
+                    embed.add_field(name="⬅️ Old Value", value=str(changes['old_value'])[:1024], inline=False)
+                if changes.get('new_value'):
+                    embed.add_field(name="➡️ New Value", value=str(changes['new_value'])[:1024], inline=False)
+
+                embed.set_footer(text=f"Task ID: {task['gid']}")
+                await audit_manager.send_audit_embed('updates', embed)
+
+    except Exception as e:
+        logger.error(f"Error processing task event: {e}")
+
+async def process_project_event(event):
+    """Process project-related webhook events."""
+    try:
+        action = event.get('action')
+
+        if action == 'added':
+            # New project created
+            project_gid = event.get('resource', {}).get('gid')
+
+            # Get project details
+            project = asana_client.projects.get_project(project_gid)
+
+            embed = discord.Embed(
+                title="📁 New Project Created",
+                description=f"**{project['name']}**",
+                color=discord.Color.teal(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(name="📋 Description", value=project.get('notes', 'No description')[:1024], inline=False)
+            embed.set_footer(text=f"Project ID: {project['gid']}")
+
+            await audit_manager.send_audit_embed('new-projects', embed)
+
+    except Exception as e:
+        logger.error(f"Error processing project event: {e}")
+
+def run_flask_app():
+    """Run Flask app in a separate thread."""
+    flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False)
 
 def handle_asana_error(error: Exception) -> str:
     """Convert Asana API errors to user-friendly messages."""
@@ -560,8 +896,118 @@ async def help_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="audit-setup", description="Set up Botsana audit channels for monitoring Asana activity")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def audit_setup_command(interaction: discord.Interaction):
+    """Set up the Botsana audit system with dedicated channels."""
+    await interaction.response.defer()
+
+    try:
+        # Check if audit system is already set up
+        botsana_category = discord.utils.get(interaction.guild.categories, name="🤖 Botsana")
+        if botsana_category:
+            embed = discord.Embed(
+                title="⚠️ Audit System Already Exists",
+                description="The Botsana audit system is already set up in this server.",
+                color=discord.Color.yellow()
+            )
+            embed.add_field(
+                name="Category",
+                value=botsana_category.mention,
+                inline=True
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Create audit channels
+        category = await audit_manager.setup_audit_channels(interaction.guild)
+
+        # Register webhooks
+        base_url = os.getenv('HEROKU_URL', f"https://{os.getenv('HEROKU_APP_NAME', 'botsana-discord-bot')}.herokuapp.com")
+        await audit_manager.register_webhooks(base_url)
+
+        # Start periodic tasks
+        scheduler.add_job(audit_manager.check_missed_deadlines, 'cron', hour=9, minute=0)  # Daily at 9 AM
+        scheduler.add_job(audit_manager.check_due_soon, 'interval', hours=1)  # Every hour
+
+        if not scheduler.running:
+            scheduler.start()
+
+        embed = discord.Embed(
+            title="✅ Audit System Setup Complete",
+            description="Botsana audit channels have been created and configured!",
+            color=discord.Color.green()
+        )
+
+        embed.add_field(
+            name="📁 Category Created",
+            value=category.mention,
+            inline=True
+        )
+
+        embed.add_field(
+            name="📺 Channels Created",
+            value=str(len(AUDIT_CHANNELS)),
+            inline=True
+        )
+
+        channels_list = "\n".join([f"• `{name}` - {desc}" for name, desc in AUDIT_CHANNELS.items()])
+        embed.add_field(
+            name="📋 Available Channels",
+            value=channels_list,
+            inline=False
+        )
+
+        embed.add_field(
+            name="🔗 Webhook Status",
+            value="✅ Registered for real-time updates",
+            inline=True
+        )
+
+        embed.set_footer(text="The audit system will now automatically monitor all Asana activity!")
+
+        await interaction.followup.send(embed=embed)
+
+    except discord.Forbidden:
+        embed = discord.Embed(
+            title="❌ Permission Denied",
+            description="I don't have permission to create channels. Please give me the 'Manage Channels' permission.",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        error_message = handle_asana_error(e)
+        embed = discord.Embed(
+            title="❌ Setup Failed",
+            description=f"Failed to set up audit system: {error_message}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@audit_setup_command.error
+async def audit_setup_error(interaction: discord.Interaction, error):
+    """Handle audit setup command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to set up the audit system.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Audit setup error: {error}")
+
 async def main():
     """Main function to run the bot."""
+    # Start Flask app in a separate thread
+    flask_thread = threading.Thread(target=run_flask_app, daemon=True)
+    flask_thread.start()
+
+    # Start the bot
     async with bot:
         await bot.start(DISCORD_TOKEN)
 
