@@ -20,6 +20,7 @@ import json
 from datetime import datetime, timedelta
 from config import bot_config
 from error_logger import init_error_logger
+from database import db_manager
 
 # Load environment variables
 load_dotenv()
@@ -1180,6 +1181,89 @@ async def set_default_project_error(interaction: discord.Interaction, error):
         if error_logger:
             await error_logger.log_error(error, "set-default-project command error", severity="ERROR")
         logger.error(f"Set default project error: {error}")
+
+@bot.tree.command(name="view-error-logs", description="View recent error logs (Admin only)")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def view_error_logs_command(interaction: discord.Interaction, limit: Optional[int] = 10):
+    """View recent error logs for this server."""
+    await interaction.response.defer()
+
+    try:
+        if limit > 25:
+            limit = 25  # Discord embed limits
+
+        with db_manager.get_session() as session:
+            error_logs = session.query(db_manager.ErrorLog).filter(
+                db_manager.ErrorLog.guild_id == interaction.guild.id
+            ).order_by(db_manager.ErrorLog.created_at.desc()).limit(limit).all()
+
+        if not error_logs:
+            embed = discord.Embed(
+                title="📋 Error Logs",
+                description="No error logs found for this server.",
+                color=discord.Color.blue()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title="📋 Recent Error Logs",
+            description=f"Showing last {len(error_logs)} errors",
+            color=discord.Color.red(),
+            timestamp=datetime.now()
+        )
+
+        for i, error_log in enumerate(error_logs[:10], 1):  # Limit to 10 in embed
+            severity_emoji = {
+                "CRITICAL": "🚨",
+                "ERROR": "❌",
+                "WARNING": "⚠️",
+                "INFO": "ℹ️"
+            }.get(error_log.severity, "❓")
+
+            timestamp = error_log.created_at.strftime("%m/%d %H:%M")
+            command_info = f" (`/{error_log.command}`)" if error_log.command else ""
+
+            error_summary = f"{severity_emoji} **{error_log.error_type}**{command_info}\n"
+            error_summary += f"📅 {timestamp} | 👤 <@{error_log.user_id}>\n"
+            error_summary += f"💬 {error_log.error_message[:100]}{'...' if len(error_log.error_message) > 100 else ''}"
+
+            embed.add_field(
+                name=f"Error #{i}",
+                value=error_summary,
+                inline=False
+            )
+
+        if len(error_logs) > 10:
+            embed.set_footer(text=f"Showing first 10 of {len(error_logs)} total errors")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "view-error-logs")
+
+        embed = discord.Embed(
+            title="❌ Failed to Load Error Logs",
+            description=f"Could not retrieve error logs: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@view_error_logs_command.error
+async def view_error_logs_error(interaction: discord.Interaction, error):
+    """Handle view error logs command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to view error logs.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"View error logs error: {error}")
 
 async def main():
     """Main function to run the bot."""

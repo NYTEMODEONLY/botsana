@@ -6,9 +6,11 @@ Handles logging to Discord audit channels and provides detailed error analysis.
 import logging
 import discord
 import json
+import traceback
 from datetime import datetime
 from typing import Optional, Dict, Any
 from config import bot_config
+from database import db_manager, ErrorLog
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ class ErrorLogger:
                         guild_id: Optional[int] = None, command: Optional[str] = None,
                         severity: str = "ERROR") -> bool:
         """
-        Log an error with comprehensive context.
+        Log an error with comprehensive context to both database and Discord.
 
         Args:
             error: The exception that occurred
@@ -49,6 +51,9 @@ class ErrorLogger:
             'command': command
         }
 
+        # Get stack trace
+        stack_trace = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+
         # Log to console/file
         log_message = f"[{severity}] {type(error).__name__}: {error}"
         if context:
@@ -66,6 +71,27 @@ class ErrorLogger:
             logger.warning(log_message)
         else:
             logger.error(log_message)
+
+        # Save to database
+        try:
+            with db_manager.get_session() as session:
+                if guild_id:
+                    db_manager.ensure_guild_exists(guild_id)
+
+                error_log = ErrorLog(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    severity=severity,
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                    context=context,
+                    command=command,
+                    stack_trace=stack_trace[:5000]  # Limit stack trace length
+                )
+                session.add(error_log)
+                session.commit()
+        except Exception as db_error:
+            logger.error(f"Failed to save error to database: {db_error}")
 
         # Send to audit log channel if configured
         success = await self._send_to_audit_channel(error_info, severity)
