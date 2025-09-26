@@ -51,25 +51,39 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 
 ## Heroku Deployment
 
-1. **Create a Heroku app:**
-   ```bash
-   heroku create your-app-name
-   ```
+✅ **Already Deployed!** The bot is live at: https://botsana-discord-bot-84a05a4a51d3.herokuapp.com/
 
-2. **Set environment variables in Heroku:**
+**Current Status:**
+- ✅ Code deployed to Heroku
+- ✅ Discord token configured
+- ❌ **Needs Asana credentials to function**
+
+**To Complete Setup:**
+
+1. **Set Asana environment variables in Heroku:**
    ```bash
-   heroku config:set DISCORD_TOKEN=your_discord_bot_token
    heroku config:set ASANA_ACCESS_TOKEN=your_asana_personal_access_token
    heroku config:set ASANA_WORKSPACE_ID=your_workspace_id
    heroku config:set ASANA_DEFAULT_PROJECT_ID=your_default_project_id
    ```
 
-3. **Deploy to Heroku:**
-   ```bash
-   git add .
-   git commit -m "Initial commit"
-   git push heroku main
-   ```
+2. **Get your Asana Personal Access Token:**
+   - Go to [Asana Settings → Apps → Personal Access Tokens](https://app.asana.com/0/my-apps)
+   - Create a new token with appropriate permissions
+   - It will look like: `1/1234567890:abcdef...`
+
+3. **Find your Asana Workspace ID:**
+   - Look at the URL when you're in your Asana workspace
+   - The ID is the long number in the URL (e.g., `1234567890123456`)
+
+**Bot Commands:**
+- `/create-task name:"Task name" project:"Project ID"`
+- `/update-task id:12345 name:"New name"`
+- `/complete-task id:12345`
+- `/list-tasks project:"Project ID"`
+- `/delete-task id:12345`
+- `/view-task id:12345`
+- `/help`
 
 ## Security Notes
 
