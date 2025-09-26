@@ -11,6 +11,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - **🤖 AI-Powered Natural Language** - Create tasks using conversational language
 - **⚙️ Bulk Operations** - Select and operate on multiple tasks at once
 - **📋 Task Templates** - Save and reuse common task configurations
+- **🕐 Time Tracking** - Virtual assistant clock in/out with time proof validation
 - **🔔 Smart Notifications** - Personalized due date reminders and assignment alerts
 - Secure environment variable handling
 - Ready for Heroku deployment
@@ -71,6 +72,13 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/list-templates` - Browse available task templates
 - `/use-template template:"Bug Report" custom_name:"🐛 Login issue"` - Create tasks from saved templates
 - `/delete-template template:"Bug Report"` - Remove templates (Admin only)
+
+### 🕐 Time Tracking
+- `/clock-in` - Start tracking work time
+- `/clock-out time_proof_link:"https://docs.google.com/..." notes:"Work completed"` - End session with proof
+- `/time-status` - Check your current clock in/out status
+- `/time-history limit:5` - View recent time entries and history
+- `/timeclock-status` - View all currently active sessions (Admin only)
 
 ### Audit System Setup
 - `/audit-setup` - **ADMIN ONLY** - Set up the Botsana audit category and channels
@@ -294,6 +302,84 @@ Templates track usage statistics:
 - Support tickets
 - Recurring tasks
 - Department workflows
+
+## 🕐 Time Tracking System
+
+Track work hours with virtual assistants using a dedicated #timeclock channel and automated Asana logging.
+
+### Getting Started
+
+Create a `#timeclock` channel in your Discord server for time tracking commands.
+
+### Clock In/Out Commands
+
+**`/clock-in`** - Start tracking work time
+```
+/clock-in
+```
+- Creates a timestamped entry
+- Prevents duplicate clock-ins
+- Automatically creates Asana task in "TimeClock" project
+
+**`/clock-out`** - End session with time proof
+```
+/clock-out time_proof_link:"https://docs.google.com/spreadsheets/..." notes:"Completed client work"
+```
+- Requires valid time proof URL (Google Sheets, Docs, etc.)
+- Calculates total session duration
+- Updates Asana task with completion details
+- Stores notes and proof link
+
+### Monitoring Commands
+
+**`/time-status`** - Check your current status
+- Shows if clocked in/out
+- Displays current session duration
+- Shows today's total time worked
+
+**`/time-history`** - View recent sessions
+```
+/time-history limit:5
+```
+- Lists recent time entries
+- Shows duration, dates, and proof links
+- Provides session summaries and averages
+
+**`/timeclock-status`** - Admin view of all active sessions (Admin only)
+- Shows all currently clocked-in users
+- Displays session durations
+- Helps monitor team activity
+
+### Asana Integration
+
+Automatically creates tasks in a dedicated "TimeClock" project:
+- **Clock In**: Creates task when session starts
+- **Clock Out**: Updates task with duration and proof
+- **Assignment**: Assigns to mapped Asana user if available
+- **Details**: Includes timestamps, duration, proof links, and notes
+
+### Time Proof Requirements
+
+Time proof links are required for clocking out and must be:
+- Valid URLs (http:// or https://)
+- Accessible work documentation
+- Examples: Google Sheets, Docs, Drive folders, screenshots, etc.
+
+### Features
+
+- **Duplicate Prevention**: Cannot clock in twice
+- **Duration Tracking**: Precise second-by-second timing
+- **Proof Validation**: Ensures valid URLs for time proof
+- **Daily Totals**: Calculate and display daily work totals
+- **Audit Trail**: Complete logging of all time entries
+- **Asana Sync**: Automatic task creation and updates
+
+**Perfect for managing:**
+- Virtual assistant work sessions
+- Freelancer time tracking
+- Team productivity monitoring
+- Client billing preparation
+- Work verification and proof
 
 ## ⚙️ Bulk Task Operations
 
