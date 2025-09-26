@@ -1591,6 +1591,15 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="📊 Project Dashboards",
+        value="""`create-dashboard` - Create visual project status overviews
+`view-dashboard` - Display project dashboard with metrics
+`list-dashboards` - Browse all available dashboards
+`delete-dashboard` - Delete project dashboards""",
+        inline=False
+    )
+
+    embed.add_field(
         name="🕐 Time Tracking",
         value="""`clock-in` - Start tracking work time
 `clock-out` - End session with time proof link
@@ -3503,6 +3512,462 @@ async def delete_search_command(interaction: discord.Interaction, search: str):
         embed = discord.Embed(
             title="❌ Deletion Failed",
             description=f"Failed to delete search: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="create-dashboard", description="Create a project dashboard for visual project status")
+@app_commands.describe(
+    name="Dashboard name (e.g., 'Development Sprint', 'Q4 Planning')",
+    description="Optional description of what this dashboard shows",
+    projects="Comma-separated list of Asana project IDs to include",
+    metrics="Comma-separated list of metrics to display (task_count, completion_rate, overdue_count, due_soon_count)"
+)
+async def create_dashboard_command(
+    interaction: discord.Interaction,
+    name: str,
+    projects: str,
+    metrics: str = "task_count,completion_rate,overdue_count,due_soon_count",
+    description: Optional[str] = None
+):
+    """Create a project dashboard for visual project status."""
+    await interaction.response.defer()
+
+    try:
+        # Parse projects list
+        project_list = [p.strip() for p in projects.split(',') if p.strip()]
+        if not project_list:
+            embed = discord.Embed(
+                title="❌ Invalid Projects",
+                description="Please provide at least one valid project ID.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Validate project IDs
+        valid_projects = []
+        for project_id in project_list:
+            try:
+                project_info = asana_client.projects.get_project(project_id)
+                valid_projects.append({
+                    'id': project_id,
+                    'name': project_info['name']
+                })
+            except Exception:
+                embed = discord.Embed(
+                    title="⚠️ Invalid Project ID",
+                    description=f"Could not find Asana project with ID `{project_id}`. Skipping this project.",
+                    color=discord.Color.yellow()
+                )
+                await interaction.followup.send(embed=embed)
+
+        if not valid_projects:
+            embed = discord.Embed(
+                title="❌ No Valid Projects",
+                description="None of the provided project IDs were valid. Please check your project IDs.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Parse metrics list
+        valid_metrics = ['task_count', 'completion_rate', 'overdue_count', 'due_soon_count', 'assignee_breakdown']
+        metrics_list = [m.strip() for m in metrics.split(',') if m.strip() and m.strip() in valid_metrics]
+
+        if not metrics_list:
+            metrics_list = ['task_count', 'completion_rate', 'overdue_count', 'due_soon_count']
+
+        # Check if dashboard name already exists
+        existing_dashboards = db_manager.get_project_dashboards(interaction.guild.id)
+        if any(d['name'].lower() == name.lower() for d in existing_dashboards):
+            embed = discord.Embed(
+                title="❌ Dashboard Name Already Exists",
+                description=f"A dashboard with the name '{name}' already exists. Please choose a different name.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Create the dashboard
+        success = db_manager.create_project_dashboard(
+            guild_id=interaction.guild.id,
+            name=name,
+            projects=[p['id'] for p in valid_projects],
+            metrics=metrics_list,
+            description=description,
+            created_by=interaction.user.id
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Dashboard Created",
+                description=f"Project dashboard '{name}' has been created and is ready to use!",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="📊 Dashboard Name",
+                value=f"`{name}`",
+                inline=True
+            )
+
+            embed.add_field(
+                name="🏗️ Projects Included",
+                value="\n".join(f"• `{p['name']}` ({p['id']})" for p in valid_projects),
+                inline=False
+            )
+
+            embed.add_field(
+                name="📈 Metrics Displayed",
+                value="\n".join(f"• {m.replace('_', ' ').title()}" for m in metrics_list),
+                inline=False
+            )
+
+            embed.add_field(
+                name="👤 Created By",
+                value=interaction.user.mention,
+                inline=True
+            )
+
+            embed.add_field(
+                name="🚀 How to Use",
+                value=f"Use `/view-dashboard dashboard:\"{name}\"` to display this dashboard",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+
+            # Log dashboard creation
+            await error_logger.log_system_event(
+                "dashboard_created",
+                f"Project dashboard '{name}' created by {interaction.user.display_name}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "dashboard_name": name, "project_count": len(valid_projects)},
+                "INFO"
+            )
+
+        else:
+            embed = discord.Embed(
+                title="❌ Creation Failed",
+                description="Failed to create the dashboard. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "create-dashboard")
+
+        embed = discord.Embed(
+            title="❌ Creation Failed",
+            description=f"An error occurred while creating the dashboard: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="view-dashboard", description="Display a project dashboard with visual project status")
+@app_commands.describe(
+    dashboard="Name of the dashboard to display"
+)
+async def view_dashboard_command(interaction: discord.Interaction, dashboard: str):
+    """Display a project dashboard with visual project status."""
+    await interaction.response.defer()
+
+    try:
+        # Find the dashboard by name
+        dashboards = db_manager.get_project_dashboards(interaction.guild.id)
+        target_dashboard = None
+
+        # Try exact match first, then case-insensitive match
+        for d in dashboards:
+            if d['name'].lower() == dashboard.lower():
+                target_dashboard = d
+                break
+
+        if not target_dashboard:
+            embed = discord.Embed(
+                title="❌ Dashboard Not Found",
+                description=f"No dashboard found with name '{dashboard}'.",
+                color=discord.Color.red()
+            )
+
+            # Suggest similar dashboards
+            similar = [d['name'] for d in dashboards if dashboard.lower() in d['name'].lower()]
+            if similar:
+                embed.add_field(
+                    name="💡 Did you mean?",
+                    value="\n".join(f"• `{name}`" for name in similar[:3]),
+                    inline=False
+                )
+
+            embed.add_field(
+                name="📊 Available Dashboards",
+                value="Use `/list-dashboards` to see all available dashboards",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Update usage count
+        db_manager.update_dashboard_usage(target_dashboard['id'])
+
+        # Generate dashboard data
+        dashboard_data = await generate_dashboard_data(target_dashboard)
+
+        if not dashboard_data:
+            embed = discord.Embed(
+                title="❌ Dashboard Error",
+                description="Failed to load dashboard data. Some projects may be inaccessible.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Create the main dashboard embed
+        embed = discord.Embed(
+            title=f"📊 {target_dashboard['name']}",
+            description=target_dashboard['description'] or "Project status overview",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        # Add project summaries
+        for project_data in dashboard_data['projects']:
+            project_embed = discord.Embed(
+                title=f"🏗️ {project_data['name']}",
+                color=project_data['color']
+            )
+
+            # Add metrics based on dashboard configuration
+            if 'task_count' in target_dashboard['metrics']:
+                project_embed.add_field(
+                    name="📋 Total Tasks",
+                    value=str(project_data['total_tasks']),
+                    inline=True
+                )
+
+            if 'completion_rate' in target_dashboard['metrics']:
+                completion_rate = project_data['completion_rate']
+                progress_bar = create_progress_bar(completion_rate)
+                project_embed.add_field(
+                    name="✅ Completion Rate",
+                    value=f"{completion_rate:.1f}%\n{progress_bar}",
+                    inline=True
+                )
+
+            if 'overdue_count' in target_dashboard['metrics']:
+                overdue_count = project_data['overdue_count']
+                overdue_indicator = "🔴" if overdue_count > 0 else "🟢"
+                project_embed.add_field(
+                    name="⏰ Overdue Tasks",
+                    value=f"{overdue_indicator} {overdue_count}",
+                    inline=True
+                )
+
+            if 'due_soon_count' in target_dashboard['metrics']:
+                due_soon_count = project_data['due_soon_count']
+                due_soon_indicator = "🟡" if due_soon_count > 0 else "🟢"
+                project_embed.add_field(
+                    name="📅 Due Soon (7 days)",
+                    value=f"{due_soon_indicator} {due_soon_count}",
+                    inline=True
+                )
+
+            if 'assignee_breakdown' in target_dashboard['metrics'] and project_data['assignee_breakdown']:
+                assignee_list = "\n".join(f"• {name}: {count}" for name, count in list(project_data['assignee_breakdown'].items())[:5])
+                if len(project_data['assignee_breakdown']) > 5:
+                    assignee_list += f"\n• ... and {len(project_data['assignee_breakdown']) - 5} more"
+                project_embed.add_field(
+                    name="👥 Task Distribution",
+                    value=assignee_list,
+                    inline=False
+                )
+
+            await interaction.followup.send(embed=project_embed)
+
+        # Add summary embed
+        summary_embed = discord.Embed(
+            title="📈 Dashboard Summary",
+            color=discord.Color.green()
+        )
+
+        total_tasks = sum(p['total_tasks'] for p in dashboard_data['projects'])
+        completed_tasks = sum(p['completed_tasks'] for p in dashboard_data['projects'])
+        overall_completion = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+
+        summary_embed.add_field(
+            name="📊 Overall Progress",
+            value=f"{overall_completion:.1f}% complete\n{completed_tasks}/{total_tasks} tasks",
+            inline=True
+        )
+
+        total_overdue = sum(p['overdue_count'] for p in dashboard_data['projects'])
+        total_due_soon = sum(p['due_soon_count'] for p in dashboard_data['projects'])
+
+        summary_embed.add_field(
+            name="⚠️ Urgent Items",
+            value=f"Overdue: {total_overdue}\nDue Soon: {total_due_soon}",
+            inline=True
+        )
+
+        summary_embed.add_field(
+            name="📈 Projects Tracked",
+            value=str(len(dashboard_data['projects'])),
+            inline=True
+        )
+
+        summary_embed.set_footer(text=f"Dashboard viewed {target_dashboard['usage_count'] + 1} times • Last updated: {datetime.now().strftime('%H:%M UTC')}")
+
+        await interaction.followup.send(embed=summary_embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "view-dashboard")
+
+        embed = discord.Embed(
+            title="❌ Dashboard Error",
+            description=f"An error occurred while loading the dashboard: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="list-dashboards", description="Browse all available project dashboards")
+async def list_dashboards_command(interaction: discord.Interaction):
+    """Browse all available project dashboards."""
+    await interaction.response.defer()
+
+    try:
+        dashboards = db_manager.get_project_dashboards(interaction.guild.id)
+
+        if not dashboards:
+            embed = discord.Embed(
+                title="📊 Project Dashboards",
+                description="No project dashboards have been created for this server yet.",
+                color=discord.Color.blue()
+            )
+
+            embed.add_field(
+                name="🚀 Create Your First Dashboard",
+                value="Use `/create-dashboard` to create visual project status overviews",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title="📊 Project Dashboards",
+            description=f"Found {len(dashboards)} dashboard{'s' if len(dashboards) != 1 else ''} for this server",
+            color=discord.Color.blue()
+        )
+
+        for i, dashboard in enumerate(dashboards[:10], 1):  # Limit to 10 dashboards in embed
+            dashboard_info = f"**{dashboard['name']}**"
+            if dashboard['description']:
+                dashboard_info += f"\n{dashboard['description'][:100]}{'...' if len(dashboard['description']) > 100 else ''}"
+
+            dashboard_info += f"\n🏗️ {len(dashboard['projects'])} projects"
+            dashboard_info += f"\n📈 {len(dashboard['metrics'])} metrics"
+            dashboard_info += f"\n👁️ Viewed {dashboard['usage_count']} time{'s' if dashboard['usage_count'] != 1 else ''}"
+
+            embed.add_field(
+                name=f"{i}. {dashboard['name']}",
+                value=dashboard_info,
+                inline=False
+            )
+
+        embed.add_field(
+            name="🚀 How to Use",
+            value="Use `/view-dashboard dashboard:\"Dashboard Name\"` to display any dashboard",
+            inline=False
+        )
+
+        if len(dashboards) > 10:
+            embed.set_footer(text=f"Showing first 10 dashboards. Total: {len(dashboards)}")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "list-dashboards")
+
+        embed = discord.Embed(
+            title="❌ Failed to Load Dashboards",
+            description=f"Could not load dashboards: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="delete-dashboard", description="Delete a project dashboard")
+@app_commands.describe(
+    dashboard="Name of the dashboard to delete"
+)
+async def delete_dashboard_command(interaction: discord.Interaction, dashboard: str):
+    """Delete a project dashboard."""
+    await interaction.response.defer()
+
+    try:
+        # Find the dashboard by name
+        dashboards = db_manager.get_project_dashboards(interaction.guild.id, active_only=False)
+        target_dashboard = None
+        dashboard_id = None
+
+        for d in dashboards:
+            if d['name'].lower() == dashboard.lower():
+                target_dashboard = d
+                dashboard_id = d['id']
+                break
+
+        if not target_dashboard:
+            embed = discord.Embed(
+                title="❌ Dashboard Not Found",
+                description=f"No dashboard found with name '{dashboard}'.",
+                color=discord.Color.red()
+            )
+
+            embed.add_field(
+                name="📊 Available Dashboards",
+                value="Use `/list-dashboards` to see all available dashboards",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Check if user created this dashboard or is admin
+        is_admin = interaction.user.guild_permissions.administrator
+        is_creator = target_dashboard['created_by'] == interaction.user.id
+
+        if not (is_admin or is_creator):
+            embed = discord.Embed(
+                title="❌ Permission Denied",
+                description="You can only delete dashboards that you created, or ask an administrator to delete it.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Confirm deletion
+        embed = discord.Embed(
+            title="🗑️ Confirm Dashboard Deletion",
+            description=f"Are you sure you want to delete the dashboard **{target_dashboard['name']}**?",
+            color=discord.Color.orange()
+        )
+
+        embed.add_field(
+            name="⚠️ This action cannot be undone",
+            value=f"This dashboard has been viewed {target_dashboard['usage_count']} time{'s' if target_dashboard['usage_count'] != 1 else ''}.",
+            inline=False
+        )
+
+        view = DashboardDeletionView(dashboard_id, target_dashboard['name'], interaction)
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "delete-dashboard")
+
+        embed = discord.Embed(
+            title="❌ Deletion Failed",
+            description=f"Failed to delete dashboard: {str(e)}",
             color=discord.Color.red()
         )
         await interaction.followup.send(embed=embed)
@@ -5849,6 +6314,81 @@ def format_duration(seconds: int) -> str:
 
     return f"{days}d {hours}h {minutes}m"
 
+def create_progress_bar(percentage: float, length: int = 10) -> str:
+    """Create a visual progress bar string."""
+    filled = int(percentage / 100 * length)
+    empty = length - filled
+    return "█" * filled + "░" * empty
+
+async def generate_dashboard_data(dashboard_config: dict) -> Optional[dict]:
+    """Generate comprehensive dashboard data from Asana projects."""
+    try:
+        project_data = []
+        colors = [discord.Color.blue(), discord.Color.green(), discord.Color.purple(),
+                 discord.Color.orange(), discord.Color.red(), discord.Color.teal()]
+
+        for i, project_id in enumerate(dashboard_config['projects']):
+            try:
+                # Get project info
+                project_info = asana_client.projects.get_project(project_id)
+
+                # Get all tasks in the project
+                tasks = asana_client.tasks.get_tasks({
+                    'project': project_id,
+                    'opt_fields': 'name,completed,due_on,assignee.name,created_at'
+                })
+
+                tasks_list = list(tasks)
+
+                # Analyze tasks
+                total_tasks = len(tasks_list)
+                completed_tasks = sum(1 for task in tasks_list if task.get('completed', False))
+
+                # Calculate completion rate
+                completion_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+
+                # Check for overdue and due soon tasks
+                now = datetime.now().date()
+                overdue_count = 0
+                due_soon_count = 0
+
+                for task in tasks_list:
+                    if task.get('due_on') and not task.get('completed', False):
+                        due_date = datetime.fromisoformat(task['due_on']).date()
+                        if due_date < now:
+                            overdue_count += 1
+                        elif (due_date - now).days <= 7:
+                            due_soon_count += 1
+
+                # Assignee breakdown
+                assignee_breakdown = {}
+                for task in tasks_list:
+                    if task.get('assignee'):
+                        assignee_name = task['assignee']['name']
+                        assignee_breakdown[assignee_name] = assignee_breakdown.get(assignee_name, 0) + 1
+
+                project_data.append({
+                    'id': project_id,
+                    'name': project_info['name'],
+                    'total_tasks': total_tasks,
+                    'completed_tasks': completed_tasks,
+                    'completion_rate': completion_rate,
+                    'overdue_count': overdue_count,
+                    'due_soon_count': due_soon_count,
+                    'assignee_breakdown': assignee_breakdown,
+                    'color': colors[i % len(colors)]
+                })
+
+            except Exception as e:
+                logger.warning(f"Failed to load data for project {project_id}: {e}")
+                continue
+
+        return {'projects': project_data}
+
+    except Exception as e:
+        logger.error(f"Error generating dashboard data: {e}")
+        return None
+
 def check_timeclock_channel(interaction: discord.Interaction) -> bool:
     """Check if the command is being used in the designated timeclock channel."""
     timeclock_channel = db_manager.get_timeclock_channel(interaction.guild.id)
@@ -6520,6 +7060,96 @@ class SearchDeletionView(discord.ui.View):
         timeout_embed = discord.Embed(
             title="⏰ Deletion Timed Out",
             description="The search deletion confirmation has expired. The search was not deleted.",
+            color=discord.Color.yellow()
+        )
+
+        try:
+            await self.message.edit(embed=timeout_embed, view=self)
+        except:
+            pass  # Message might have been deleted
+
+# Dashboard Deletion Confirmation View
+class DashboardDeletionView(discord.ui.View):
+    """View for confirming dashboard deletion."""
+
+    def __init__(self, dashboard_id, dashboard_name, interaction):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.dashboard_id = dashboard_id
+        self.dashboard_name = dashboard_name
+        self.interaction = interaction
+
+    @discord.ui.button(label="🗑️ Delete Dashboard", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Confirm dashboard deletion."""
+        try:
+            # Disable buttons
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            # Delete the dashboard
+            success = db_manager.delete_project_dashboard(self.dashboard_id)
+
+            if success:
+                embed = discord.Embed(
+                    title="✅ Dashboard Deleted",
+                    description=f"Project dashboard **{self.dashboard_name}** has been permanently deleted.",
+                    color=discord.Color.green()
+                )
+
+                embed.set_footer(text="This action cannot be undone")
+
+                await interaction.followup.send(embed=embed)
+
+                # Log dashboard deletion
+                await error_logger.log_system_event(
+                    "dashboard_deleted",
+                    f"Project dashboard '{self.dashboard_name}' deleted by {interaction.user.display_name}",
+                    {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "dashboard_name": self.dashboard_name},
+                    "WARNING"
+                )
+            else:
+                embed = discord.Embed(
+                    title="❌ Deletion Failed",
+                    description="Failed to delete the dashboard. It may have already been deleted.",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "confirm_dashboard_deletion")
+
+            error_embed = discord.Embed(
+                title="❌ Deletion Failed",
+                description=f"An error occurred while deleting the dashboard: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel dashboard deletion."""
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        cancel_embed = discord.Embed(
+            title="❌ Deletion Cancelled",
+            description="The dashboard deletion has been cancelled.",
+            color=discord.Color.grey()
+        )
+        await interaction.followup.send(embed=cancel_embed)
+
+    async def on_timeout(self):
+        """Handle when the view times out."""
+        # Disable all components
+        for item in self.children:
+            item.disabled = True
+
+        timeout_embed = discord.Embed(
+            title="⏰ Deletion Timed Out",
+            description="The dashboard deletion confirmation has expired. The dashboard was not deleted.",
             color=discord.Color.yellow()
         )
 

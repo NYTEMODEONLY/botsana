@@ -32,6 +32,7 @@ class Guild(Base):
     time_entries = relationship("TimeEntry", back_populates="guild", cascade="all, delete-orphan")
     timeclock_channels = relationship("TimeclockChannel", back_populates="guild", cascade="all, delete-orphan")
     saved_searches = relationship("SavedSearch", back_populates="guild", cascade="all, delete-orphan")
+    project_dashboards = relationship("ProjectDashboard", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -233,6 +234,28 @@ class SavedSearch(Base):
 
     # Relationships
     guild = relationship("Guild", back_populates="saved_searches")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class ProjectDashboard(Base):
+    """Project dashboard configurations for visual project status."""
+    __tablename__ = 'project_dashboards'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    name = Column(String(255), nullable=False)  # Dashboard name (e.g., "Development Sprint")
+    description = Column(Text)  # Dashboard description
+    projects = Column(Text, nullable=False)  # JSON array of project IDs to include
+    metrics = Column(Text, nullable=False)  # JSON array of metrics to display
+    is_active = Column(Boolean, default=True)  # Whether dashboard is available
+    refresh_interval = Column(Integer, default=3600)  # Auto-refresh interval in seconds
+    usage_count = Column(Integer, default=0)  # How many times dashboard has been viewed
+    created_by = Column(BigInteger, nullable=False)  # Discord user who created it
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="project_dashboards")
 
     __table_args__ = {'sqlite_autoincrement': True}
 
@@ -948,6 +971,108 @@ class DatabaseManager:
                 return False
         except Exception as e:
             print(f"Error deleting saved search: {e}")
+            return False
+
+    def create_project_dashboard(self, guild_id: int, name: str, projects: list, metrics: list, created_by: int, **dashboard_params) -> bool:
+        """Create a new project dashboard."""
+        try:
+            with self.get_session() as session:
+                import json
+                dashboard = ProjectDashboard(
+                    guild_id=guild_id,
+                    name=name,
+                    projects=json.dumps(projects),
+                    metrics=json.dumps(metrics),
+                    created_by=created_by,
+                    **dashboard_params
+                )
+                session.add(dashboard)
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error creating project dashboard: {e}")
+            return False
+
+    def get_project_dashboards(self, guild_id: int, active_only: bool = True) -> list:
+        """Get all project dashboards for a guild."""
+        try:
+            with self.get_session() as session:
+                import json
+                query = session.query(ProjectDashboard).filter(ProjectDashboard.guild_id == guild_id)
+                if active_only:
+                    query = query.filter(ProjectDashboard.is_active == True)
+                dashboards = query.order_by(ProjectDashboard.name).all()
+
+                return [{
+                    'id': d.id,
+                    'name': d.name,
+                    'description': d.description,
+                    'projects': json.loads(d.projects),
+                    'metrics': json.loads(d.metrics),
+                    'is_active': d.is_active,
+                    'refresh_interval': d.refresh_interval,
+                    'usage_count': d.usage_count,
+                    'created_by': d.created_by,
+                    'created_at': d.created_at,
+                    'updated_at': d.updated_at
+                } for d in dashboards]
+        except Exception as e:
+            print(f"Error getting project dashboards: {e}")
+            return []
+
+    def get_project_dashboard(self, dashboard_id: int) -> Optional[Dict[str, Any]]:
+        """Get a specific project dashboard by ID."""
+        try:
+            with self.get_session() as session:
+                import json
+                dashboard = session.query(ProjectDashboard).filter(ProjectDashboard.id == dashboard_id).first()
+                if dashboard:
+                    return {
+                        'id': dashboard.id,
+                        'guild_id': dashboard.guild_id,
+                        'name': dashboard.name,
+                        'description': dashboard.description,
+                        'projects': json.loads(dashboard.projects),
+                        'metrics': json.loads(dashboard.metrics),
+                        'is_active': dashboard.is_active,
+                        'refresh_interval': dashboard.refresh_interval,
+                        'usage_count': dashboard.usage_count,
+                        'created_by': dashboard.created_by,
+                        'created_at': dashboard.created_at,
+                        'updated_at': dashboard.updated_at
+                    }
+                return None
+        except Exception as e:
+            print(f"Error getting project dashboard: {e}")
+            return None
+
+    def update_dashboard_usage(self, dashboard_id: int) -> bool:
+        """Increment the usage count for a dashboard."""
+        try:
+            with self.get_session() as session:
+                dashboard = session.query(ProjectDashboard).filter(ProjectDashboard.id == dashboard_id).first()
+                if dashboard:
+                    dashboard.usage_count += 1
+                    dashboard.updated_at = datetime.utcnow()
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error updating dashboard usage: {e}")
+            return False
+
+    def delete_project_dashboard(self, dashboard_id: int) -> bool:
+        """Delete a project dashboard."""
+        try:
+            with self.get_session() as session:
+                dashboard = session.query(ProjectDashboard).filter(ProjectDashboard.id == dashboard_id).first()
+                if dashboard:
+                    session.delete(dashboard)
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error deleting project dashboard: {e}")
             return False
 
 # Global database manager instance

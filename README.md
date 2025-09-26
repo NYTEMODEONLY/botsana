@@ -12,6 +12,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - **⚙️ Bulk Operations** - Select and operate on multiple tasks at once
 - **📋 Task Templates** - Save and reuse common task configurations
 - **🔍 Advanced Search** - Filter and save task searches with powerful criteria
+- **📊 Project Dashboards** - Visual project status with progress indicators
 - **🕐 Time Tracking** - Virtual assistant clock in/out with time proof validation
 - **🔔 Smart Notifications** - Personalized due date reminders and assignment alerts
 - Secure environment variable handling
@@ -80,6 +81,12 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/load-search search:"My Tasks"` - Run previously saved searches
 - `/list-searches` - Browse all available saved searches
 - `/delete-search search:"My Tasks"` - Delete saved searches
+
+### 📊 Project Dashboards
+- `/create-dashboard name:"Sprint" projects:"120123456789,120987654321"` - Create visual project status overviews
+- `/view-dashboard dashboard:"Sprint"` - Display project dashboard with metrics
+- `/list-dashboards` - Browse all available dashboards
+- `/delete-dashboard dashboard:"Sprint"` - Delete project dashboards
 
 ### 🕐 Time Tracking
 - `/clock-in` - Start tracking work time
@@ -400,6 +407,100 @@ All search results display:
 - **Consistency**: Standardized search criteria across team members
 - **Productivity**: Eliminate repetitive search configuration
 - **Monitoring**: Track usage patterns of different search types
+
+## 📊 Project Dashboards
+
+Visual project status monitoring with customizable metrics and real-time progress indicators.
+
+### Creating Dashboards
+
+Set up comprehensive project overviews with multiple metrics:
+
+**`/create-dashboard`** - Build visual project dashboards
+```
+/create-dashboard name:"Q4 Development Sprint" projects:"120123456789,120987654321" description:"Development team sprint progress" metrics:"task_count,completion_rate,overdue_count,due_soon_count,assignee_breakdown"
+```
+
+**Available Metrics:**
+- **task_count**: Total number of tasks in each project
+- **completion_rate**: Percentage of completed tasks with visual progress bars
+- **overdue_count**: Number of tasks past their due date
+- **due_soon_count**: Tasks due within the next 7 days
+- **assignee_breakdown**: Task distribution across team members
+
+### Viewing Dashboards
+
+Display rich visual project status with real-time data:
+
+**`/view-dashboard`** - Show comprehensive project status
+```
+/view-dashboard dashboard:"Q4 Development Sprint"
+```
+
+**Dashboard Display:**
+- **Individual Project Cards**: Each project gets its own visual card
+- **Progress Bars**: Visual completion indicators (████████░░)
+- **Color-Coded Status**: Different colors for different projects
+- **Metric Breakdown**: Detailed statistics for each configured metric
+- **Overall Summary**: Cross-project totals and urgent item counts
+
+### Managing Dashboards
+
+**`/list-dashboards`** - Browse all available dashboards
+```
+/list-dashboards
+```
+
+**`/delete-dashboard`** - Remove dashboards (creator or admin only)
+```
+/delete-dashboard dashboard:"Q4 Development Sprint"
+```
+
+### Dashboard Features
+
+**Visual Progress Indicators:**
+- Progress bars showing completion percentage
+- Color-coded status (green for good, yellow for caution, red for urgent)
+- Emoji indicators for quick status assessment
+
+**Comprehensive Metrics:**
+- Task counts and completion rates
+- Due date analysis (overdue, due soon)
+- Workload distribution across team members
+- Cross-project summary statistics
+
+**Real-Time Data:**
+- Live data from Asana API
+- Automatic calculations and aggregations
+- Usage tracking for popularity metrics
+- Timestamped updates
+
+### Use Cases
+
+**For Project Managers:**
+- Monitor multiple projects simultaneously
+- Track team productivity across projects
+- Identify bottlenecks and overdue work
+- Generate visual status reports
+
+**For Team Leads:**
+- View sprint progress at a glance
+- Monitor task distribution across team members
+- Identify projects needing attention
+- Share visual status with stakeholders
+
+**For Executives:**
+- High-level project portfolio overview
+- Quick assessment of project health
+- Identify trends across multiple initiatives
+- Make data-driven resource decisions
+
+**Dashboard benefits:**
+- **Visual Clarity**: Progress bars and color coding for instant understanding
+- **Comprehensive View**: Multiple projects in one consolidated view
+- **Real-Time Insights**: Live data directly from Asana
+- **Customizable Metrics**: Choose exactly what to monitor
+- **Team Collaboration**: Shared dashboards for aligned understanding
 
 ## 🕐 Time Tracking System
 
