@@ -55,6 +55,8 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 
 ### Audit System Setup
 - `/audit-setup` - **ADMIN ONLY** - Set up the Botsana audit category and channels
+- `/set-audit-log` - **ADMIN ONLY** - Configure the error logging channel
+- `/set-default-project` - **ADMIN ONLY** - Set default project for task creation
 
 ## Audit System
 
@@ -84,6 +86,30 @@ The Botsana audit system provides **real-time monitoring of ALL Asana activity**
 4. The system begins monitoring immediately
 
 **Note**: The audit system monitors ALL Asana activity in your workspace, not just actions performed through the bot.
+
+### Error Logging System
+
+Botsana includes a comprehensive error logging and reporting system that automatically logs critical errors and system events to a designated Discord channel.
+
+#### Setting Up Error Logging:
+1. Create a private `#audit-log` channel in your server
+2. Run `/set-audit-log #audit-log` as an Administrator
+3. Critical errors will now be automatically logged with detailed information
+
+#### What Gets Logged:
+- Command execution errors
+- Asana API failures
+- Configuration changes
+- System events and warnings
+- Authentication issues
+
+#### Error Log Format:
+Each error includes:
+- Error type and message
+- User and guild context
+- Command that triggered the error
+- Timestamp and detailed stack traces
+- Severity levels (ERROR, CRITICAL, WARNING)
 
 ## Heroku Deployment
 

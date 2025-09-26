@@ -18,6 +18,8 @@ import threading
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import json
 from datetime import datetime, timedelta
+from config import bot_config
+from error_logger import init_error_logger
 
 # Load environment variables
 load_dotenv()
@@ -84,14 +86,22 @@ class AsanaManager:
 
     async def create_task(self, name: str, project_id: Optional[str] = None,
                          assignee: Optional[str] = None, due_date: Optional[str] = None,
-                         notes: Optional[str] = None) -> Dict[str, Any]:
+                         notes: Optional[str] = None, guild_id: Optional[int] = None) -> Dict[str, Any]:
         """Create a new task in Asana."""
         try:
             # Use default project if none specified
             if project_id is None:
-                project_id = self.default_project_id
+                # First try guild-specific default project
+                if guild_id:
+                    guild_config = bot_config.get_guild_config(guild_id)
+                    project_id = guild_config.get('default_project_id')
+
+                # Fall back to environment variable default
                 if not project_id:
-                    raise ValueError("No project ID specified and no default project set")
+                    project_id = self.default_project_id
+
+                if not project_id:
+                    raise ValueError("No project ID specified and no default project set. Use /set-default-project to set a default project.")
 
             # Prepare task data
             task_data = {
@@ -362,6 +372,9 @@ class AuditManager:
 # Initialize audit manager
 audit_manager = AuditManager()
 
+# Initialize error logger (will be set in main)
+error_logger = None
+
 # Flask webhook endpoints
 @flask_app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -595,7 +608,8 @@ async def create_task_command(
             project_id=project,
             assignee=assignee,
             due_date=due_date,
-            notes=notes
+            notes=notes,
+            guild_id=interaction.guild.id
         )
 
         embed = discord.Embed(
@@ -613,6 +627,9 @@ async def create_task_command(
         await interaction.followup.send(embed=embed)
 
     except Exception as e:
+        # Log error to audit channel
+        await error_logger.log_command_error(interaction, e, "create-task")
+
         error_message = handle_asana_error(e)
         error_embed = discord.Embed(
             title="❌ Error Creating Task",
@@ -1001,8 +1018,176 @@ async def audit_setup_error(interaction: discord.Interaction, error):
     else:
         logger.error(f"Audit setup error: {error}")
 
+@bot.tree.command(name="set-audit-log", description="Set the audit log channel for error reporting")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def set_audit_log_command(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Set the audit log channel for comprehensive error reporting."""
+    await interaction.response.defer()
+
+    try:
+        # Validate that the bot can send messages to this channel
+        test_permissions = channel.permissions_for(interaction.guild.me)
+        if not test_permissions.send_messages or not test_permissions.embed_links:
+            embed = discord.Embed(
+                title="❌ Permission Denied",
+                description="I don't have permission to send messages and embeds in that channel. Please check my permissions.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Set the audit log channel
+        bot_config.set_audit_log_channel(interaction.guild.id, channel.id)
+
+        embed = discord.Embed(
+            title="✅ Audit Log Channel Set",
+            description=f"Error logging has been configured to send to {channel.mention}",
+            color=discord.Color.green()
+        )
+
+        embed.add_field(
+            name="📺 Channel",
+            value=channel.mention,
+            inline=True
+        )
+
+        embed.add_field(
+            name="🔧 Configuration",
+            value="Critical errors and system events will now be logged here",
+            inline=False
+        )
+
+        embed.set_footer(text="Use /audit-setup to create the full audit system")
+
+        await interaction.followup.send(embed=embed)
+
+        # Send a test message to the audit log channel
+        test_embed = discord.Embed(
+            title="🧪 Audit Log Test",
+            description="This channel has been configured for Botsana error logging.",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        test_embed.add_field(name="👑 Configured by", value=interaction.user.mention, inline=True)
+        test_embed.add_field(name="🏠 Guild", value=interaction.guild.name, inline=True)
+
+        await channel.send(embed=test_embed)
+
+    except Exception as e:
+        if error_logger:
+            await error_logger.log_command_error(interaction, e, "set-audit-log")
+
+        embed = discord.Embed(
+            title="❌ Configuration Failed",
+            description=f"Failed to set audit log channel: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@set_audit_log_command.error
+async def set_audit_log_error(interaction: discord.Interaction, error):
+    """Handle set audit log command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to configure the audit log channel.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        if error_logger:
+            await error_logger.log_error(error, "set-audit-log command error", severity="ERROR")
+        logger.error(f"Set audit log error: {error}")
+
+@bot.tree.command(name="set-default-project", description="Set the default Asana project for task creation")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def set_default_project_command(interaction: discord.Interaction, project_id: str):
+    """Set the default Asana project ID for this server."""
+    await interaction.response.defer()
+
+    try:
+        # Validate the project ID by attempting to get project info
+        try:
+            project = asana_client.projects.get_project(project_id)
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ Invalid Project ID",
+                description=f"Could not find project with ID `{project_id}`. Please check the ID and try again.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="🔍 Error", value=str(e), inline=False)
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Set the default project for this guild
+        bot_config.set_guild_config(interaction.guild.id, 'default_project_id', project_id)
+
+        embed = discord.Embed(
+            title="✅ Default Project Set",
+            description=f"Default project has been set to **{project['name']}**",
+            color=discord.Color.green()
+        )
+
+        embed.add_field(
+            name="📁 Project",
+            value=f"{project['name']} (`{project_id}`)",
+            inline=True
+        )
+
+        embed.add_field(
+            name="🎯 Impact",
+            value="All new tasks created without specifying a project will use this default",
+            inline=False
+        )
+
+        await interaction.followup.send(embed=embed)
+
+        # Log the configuration change
+        await error_logger.log_system_event(
+            "config_change",
+            f"Default project set to {project['name']} ({project_id})",
+            {"guild_id": interaction.guild.id, "user_id": interaction.user.id, "project_id": project_id},
+            "INFO"
+        )
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "set-default-project")
+
+        embed = discord.Embed(
+            title="❌ Configuration Failed",
+            description=f"Failed to set default project: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@set_default_project_command.error
+async def set_default_project_error(interaction: discord.Interaction, error):
+    """Handle set default project command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to set the default project.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        if error_logger:
+            await error_logger.log_error(error, "set-default-project command error", severity="ERROR")
+        logger.error(f"Set default project error: {error}")
+
 async def main():
     """Main function to run the bot."""
+    global error_logger
+
+    # Initialize error logger with bot instance
+    error_logger = init_error_logger(bot)
+
     # Start Flask app in a separate thread
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
