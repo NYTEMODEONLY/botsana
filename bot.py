@@ -211,6 +211,19 @@ class AsanaManager:
             logger.error(f"Error deleting task {task_id}: {e}")
             raise
 
+    async def get_workspace_users(self) -> List[Dict[str, Any]]:
+        """Get all users in the workspace."""
+        try:
+            # Get all users in the workspace
+            result = self.client.users.get_users(workspace=self.workspace_id, opt_fields='name,email')
+            users = list(result)
+            logger.info(f"Retrieved {len(users)} users from Asana workspace")
+            return users
+
+        except Exception as e:
+            logger.error(f"Error retrieving workspace users: {e}")
+            raise
+
     async def get_task(self, task_id: str) -> Dict[str, Any]:
         """Get a specific task by ID."""
         try:
@@ -225,6 +238,131 @@ class AsanaManager:
 
 # Initialize Asana manager
 asana_manager = AsanaManager(asana_client, ASANA_WORKSPACE_ID, ASANA_DEFAULT_PROJECT_ID)
+
+# Discord UI Components
+class AsanaUserSelect(discord.ui.Select):
+    """Select menu for choosing Asana users to map to Discord users."""
+
+    def __init__(self, discord_user: discord.Member, asana_users: List[Dict[str, Any]]):
+        self.discord_user = discord_user
+        self.asana_users = asana_users
+
+        # Create options for the select menu
+        options = []
+        for user in asana_users[:25]:  # Discord limits to 25 options
+            user_name = user.get('name', 'Unknown User')
+            user_email = user.get('email', '')
+            user_id = user.get('gid', user.get('id', 'unknown'))
+
+            # Create a clean label (truncate if too long)
+            label = user_name[:25] if len(user_name) <= 25 else user_name[:22] + "..."
+
+            # Create description with email if available
+            description = f"ID: {user_id}"
+            if user_email:
+                description += f" | {user_email}"
+
+            # Truncate description if too long
+            if len(description) > 50:
+                description = description[:47] + "..."
+
+            options.append(discord.SelectOption(
+                label=label,
+                description=description,
+                value=user_id
+            ))
+
+        super().__init__(
+            placeholder="Select the Asana user to map...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        """Handle the user selection."""
+        selected_asana_user_id = self.values[0]
+
+        # Find the selected Asana user details
+        selected_user = None
+        for user in self.asana_users:
+            if user.get('gid', user.get('id')) == selected_asana_user_id:
+                selected_user = user
+                break
+
+        if not selected_user:
+            await interaction.response.send_message("❌ Error: Selected user not found.", ephemeral=True)
+            return
+
+        asana_user_name = selected_user.get('name', 'Unknown User')
+
+        # Create the user mapping
+        success = db_manager.set_user_mapping(
+            guild_id=interaction.guild.id,
+            discord_user_id=self.discord_user.id,
+            asana_user_id=selected_asana_user_id,
+            discord_username=str(self.discord_user),
+            asana_user_name=asana_user_name,
+            created_by=interaction.user.id
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ User Mapping Created",
+                description=f"Successfully mapped {self.discord_user.mention} to Asana user **{asana_user_name}**",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="Discord User",
+                value=f"{self.discord_user.mention}\n`{self.discord_user.id}`",
+                inline=True
+            )
+
+            embed.add_field(
+                name="Asana User",
+                value=f"`{asana_user_name}`\nID: `{selected_asana_user_id}`",
+                inline=True
+            )
+
+            embed.set_footer(text="Tasks created by this user will now auto-assign to their Asana account")
+        else:
+            embed = discord.Embed(
+                title="❌ Mapping Failed",
+                description="Failed to create user mapping. Please try again.",
+                color=discord.Color.red()
+            )
+
+        # Update the message with the result
+        try:
+            await interaction.response.edit_message(embed=embed, view=None)
+        except discord.errors.InteractionResponded:
+            # If interaction was already responded to, send a followup
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+class AsanaUserSelectView(discord.ui.View):
+    """View containing the Asana user select menu."""
+
+    def __init__(self, discord_user: discord.Member, asana_users: List[Dict[str, Any]]):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.add_item(AsanaUserSelect(discord_user, asana_users))
+
+    async def on_timeout(self):
+        """Handle when the view times out."""
+        # Disable all components
+        for item in self.children:
+            item.disabled = True
+
+        embed = discord.Embed(
+            title="⏰ Selection Timed Out",
+            description="The user selection menu has expired. Please run `/map-user` again to try mapping this user.",
+            color=discord.Color.yellow()
+        )
+
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except:
+            pass  # Message might have been deleted
 
 # Initialize Flask app for webhooks
 flask_app = Flask(__name__)
@@ -1562,61 +1700,70 @@ async def repair_audit_error(interaction: discord.Interaction, error):
 
 @bot.tree.command(name="map-user", description="Map a Discord user to an Asana user for task assignment")
 @discord.app_commands.checks.has_permissions(administrator=True)
-async def map_user_command(
-    interaction: discord.Interaction,
-    discord_user: discord.Member,
-    asana_user_id: str,
-    asana_user_name: Optional[str] = None
-):
+async def map_user_command(interaction: discord.Interaction, discord_user: discord.Member):
     """Map a Discord user to an Asana user for automatic task assignment."""
     await interaction.response.defer()
 
     try:
-        # Set the user mapping
-        success = db_manager.set_user_mapping(
-            guild_id=interaction.guild.id,
-            discord_user_id=discord_user.id,
-            asana_user_id=asana_user_id,
-            discord_username=str(discord_user),
-            asana_user_name=asana_user_name,
-            created_by=interaction.user.id
+        # Check if user is already mapped
+        existing_mapping = db_manager.get_user_mapping(interaction.guild.id, discord_user.id)
+        if existing_mapping:
+            embed = discord.Embed(
+                title="⚠️ User Already Mapped",
+                description=f"{discord_user.mention} is already mapped to Asana user `{existing_mapping['asana_user_name'] or existing_mapping['asana_user_id']}`",
+                color=discord.Color.yellow()
+            )
+            embed.add_field(
+                name="Options",
+                value="• Use `/unmap-user @user` to remove the current mapping first\n• Or map a different Discord user",
+                inline=False
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Fetch all Asana users
+        embed = discord.Embed(
+            title="🔄 Loading Asana Users...",
+            description="Fetching users from your Asana workspace...",
+            color=discord.Color.blue()
         )
+        await interaction.followup.send(embed=embed)
 
-        if success:
-            embed = discord.Embed(
-                title="✅ User Mapping Created",
-                description=f"Successfully mapped {discord_user.mention} to Asana user `{asana_user_name or asana_user_id}`",
-                color=discord.Color.green()
-            )
+        asana_users = await asana_manager.get_workspace_users()
 
-            embed.add_field(
-                name="Discord User",
-                value=f"{discord_user.mention}\n`{discord_user.id}`",
-                inline=True
-            )
-
-            embed.add_field(
-                name="Asana User",
-                value=f"`{asana_user_name or 'Unknown'}`\nID: `{asana_user_id}`",
-                inline=True
-            )
-
-            embed.set_footer(text="Tasks created by this user will now auto-assign to their Asana account")
-        else:
-            embed = discord.Embed(
-                title="❌ Mapping Failed",
-                description="Failed to create user mapping. Please check the Asana user ID and try again.",
+        if not asana_users:
+            error_embed = discord.Embed(
+                title="❌ No Asana Users Found",
+                description="Could not retrieve any users from your Asana workspace. Please check your Asana credentials and permissions.",
                 color=discord.Color.red()
             )
+            await interaction.edit_original_response(embed=error_embed)
+            return
 
-        await interaction.followup.send(embed=embed)
+        # Create the user selection interface
+        view = AsanaUserSelectView(discord_user, asana_users)
+
+        selection_embed = discord.Embed(
+            title=f"👥 Select Asana User for {discord_user.display_name}",
+            description=f"Choose the Asana user to map to {discord_user.mention}.\n\nFound **{len(asana_users)}** user(s) in your Asana workspace.",
+            color=discord.Color.blue()
+        )
+
+        selection_embed.add_field(
+            name="📋 Instructions",
+            value="• Select the correct Asana user from the dropdown below\n• The menu will expire in 5 minutes\n• Only users with Asana access will appear",
+            inline=False
+        )
+
+        # Store the message reference for the view
+        view.message = await interaction.edit_original_response(embed=selection_embed, view=view)
 
     except Exception as e:
         await error_logger.log_command_error(interaction, e, "map-user")
 
         embed = discord.Embed(
-            title="❌ Mapping Failed",
-            description=f"An error occurred while creating the user mapping: {str(e)}",
+            title="❌ Failed to Load Users",
+            description=f"An error occurred while fetching Asana users: {str(e)}\n\nPlease check your Asana credentials and try again.",
             color=discord.Color.red()
         )
         await interaction.followup.send(embed=embed)

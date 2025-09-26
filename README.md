@@ -63,7 +63,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/repair-audit` - **ADMIN ONLY** - Repair/reset the audit system
 
 ### User Management
-- `/map-user @user asana_user_id` - **ADMIN ONLY** - Map a Discord user to an Asana user for task assignment
+- `/map-user @user` - **ADMIN ONLY** - Interactive mapping: Select from all Asana workspace users
 - `/unmap-user @user` - **ADMIN ONLY** - Remove a Discord user's Asana mapping
 - `/list-mappings` - **ADMIN ONLY** - List all Discord-Asana user mappings
 
@@ -73,12 +73,21 @@ Botsana includes an intelligent user mapping system that connects Discord users 
 
 ### How It Works
 
-1. **Setup**: Administrators map Discord users to Asana users using `/map-user @user asana_user_id`
-2. **Auto-Assignment**: When you create a task without specifying an assignee, it automatically assigns to your Asana account (if mapped)
-3. **Mention Assignment**: You can @mention Discord users in task creation to assign tasks directly to their Asana accounts
+1. **Setup**: Administrators use `/map-user @user` to start an interactive mapping process
+2. **Selection**: Bot fetches all users from your Asana workspace and presents them in a dropdown menu
+3. **Mapping**: Select the correct Asana user from the list - no manual ID entry needed!
+4. **Auto-Assignment**: When you create a task without specifying an assignee, it automatically assigns to your Asana account (if mapped)
+5. **Mention Assignment**: You can @mention Discord users in task creation to assign tasks directly to their Asana accounts
 
 ### Example Usage
 
+**Mapping a user:**
+```
+/map-user @Lobo
+```
+Bot shows: "Select Asana User for Lobo" with a dropdown of all Asana workspace users.
+
+**Creating tasks:**
 ```
 /create-task name="Fix the login bug" assignee:@developer
 ```
@@ -92,11 +101,14 @@ If you create a task without specifying an assignee:
 
 It will automatically assign the task to your Asana account (assuming you've been mapped by an admin).
 
-### Finding Asana User IDs
+### Interactive Mapping Process
 
-To find a user's Asana ID:
-1. Go to their Asana profile
-2. The ID is in the URL: `https://app.asana.com/1/1234567890/USER_ID`
+1. Run `/map-user @username`
+2. Bot fetches all users from your Asana workspace
+3. Select the correct person from the dropdown menu
+4. Mapping is created instantly!
+
+**No more manual Asana ID hunting!** 🎉
 
 ## Audit System
 
