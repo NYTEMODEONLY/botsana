@@ -179,20 +179,20 @@ class AsanaManager:
             if project_id:
                 # List tasks in a specific project
                 result = self.client.tasks.get_tasks_for_project(project_id, opt_fields='name,due_on,assignee.name,completed,notes')
-                tasks = list(result)
+                tasks = [task for task in result if task is not None]
             elif assignee:
                 # List tasks assigned to a user
                 result = self.client.tasks.get_tasks_for_user(assignee, workspace=self.workspace_id, opt_fields='name,due_on,assignee.name,completed,notes,projects.name')
-                tasks = list(result)
+                tasks = [task for task in result if task is not None]
             else:
                 # List all tasks in workspace (limited)
                 if self.default_project_id:
                     result = self.client.tasks.get_tasks_for_project(self.default_project_id, opt_fields='name,due_on,assignee.name,completed,notes')
-                    tasks = list(result)
+                    tasks = [task for task in result if task is not None]
                 else:
                     raise ValueError("No project or assignee specified, and no default project set")
 
-            logger.info(f"Retrieved {len(tasks)} tasks")
+            logger.info(f"Retrieved {len(tasks)} valid tasks from Asana API")
             return tasks
 
         except Exception as e:
@@ -801,15 +801,32 @@ async def list_tasks_command(
             color=discord.Color.blue()
         )
 
-        # Show up to the limit
-        displayed_tasks = tasks[:limit] if limit else tasks
+        # Filter out None tasks and ensure proper structure
+        valid_tasks = [task for task in tasks if task is not None and isinstance(task, dict)]
+        displayed_tasks = valid_tasks[:limit] if limit else valid_tasks
+
+        if not displayed_tasks:
+            embed = discord.Embed(
+                title="📋 No Valid Tasks Found",
+                description="Found tasks but none have valid data. This might be an API issue.",
+                color=discord.Color.yellow()
+            )
+            await interaction.followup.send(embed=embed)
+            return
 
         for i, task in enumerate(displayed_tasks, 1):
-            status = "✅" if task.get('completed') else "⏳"
-            assignee = task.get('assignee', {}).get('name', 'Unassigned')
-            due_date = task.get('due_on', 'No due date')
+            # Safely access task properties
+            task_name = task.get('name', 'Unnamed Task')
+            completed = task.get('completed', False)
+            status = "✅" if completed else "⏳"
 
-            task_info = f"{status} **{task['name']}**\n👤 {assignee} | 📅 {due_date} | ID: `{task['gid']}`"
+            assignee_data = task.get('assignee')
+            assignee = assignee_data.get('name', 'Unassigned') if assignee_data else 'Unassigned'
+
+            due_date = task.get('due_on', 'No due date')
+            task_id = task.get('gid', task.get('id', 'Unknown'))
+
+            task_info = f"{status} **{task_name}**\n👤 {assignee} | 📅 {due_date} | ID: `{task_id}`"
             if len(task_info) > 1024:
                 task_info = task_info[:1021] + "..."
 
@@ -884,23 +901,38 @@ async def view_task_command(
     try:
         task = await asana_manager.get_task(task_id)
 
+        if not task:
+            embed = discord.Embed(
+                title="❌ Task Not Found",
+                description=f"No task found with ID `{task_id}`",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        task_name = task.get('name', 'Unnamed Task')
+        task_id_display = task.get('gid', task.get('id', task_id))
+
         embed = discord.Embed(
-            title=f"📋 {task['name']}",
+            title=f"📋 {task_name}",
             color=discord.Color.blue()
         )
 
-        embed.add_field(name="Task ID", value=task['gid'], inline=True)
+        embed.add_field(name="Task ID", value=task_id_display, inline=True)
         embed.add_field(name="Status", value="✅ Completed" if task.get('completed') else "⏳ In Progress", inline=True)
 
-        if task.get('assignee'):
-            embed.add_field(name="Assignee", value=task['assignee']['name'], inline=True)
+        assignee_data = task.get('assignee')
+        if assignee_data and isinstance(assignee_data, dict):
+            embed.add_field(name="Assignee", value=assignee_data.get('name', 'Unknown'), inline=True)
 
         if task.get('due_on'):
             embed.add_field(name="Due Date", value=task['due_on'], inline=True)
 
-        if task.get('projects'):
-            project_names = [p['name'] for p in task['projects']]
-            embed.add_field(name="Projects", value=", ".join(project_names), inline=False)
+        projects_data = task.get('projects')
+        if projects_data and isinstance(projects_data, list):
+            project_names = [p.get('name', 'Unknown Project') for p in projects_data if p]
+            if project_names:
+                embed.add_field(name="Projects", value=", ".join(project_names), inline=False)
 
         if task.get('notes'):
             notes = task['notes']
