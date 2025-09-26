@@ -7,6 +7,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - Create, update, complete, and delete Asana tasks
 - List tasks from projects
 - Support for slash commands in Discord
+- **Comprehensive Audit System** - Real-time monitoring of ALL Asana activity
 - Secure environment variable handling
 - Ready for Heroku deployment
 
@@ -43,11 +44,46 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 
 ## Discord Commands
 
+### Task Management
 - `/create-task name:"Task name" due:"2025-12-31" project:"Project ID"` - Create a new task
 - `/update-task id:12345 name:"New name" due:"2025-12-31"` - Update an existing task
 - `/complete-task id:12345` - Mark a task as completed
 - `/list-tasks project:"Project ID"` - List tasks in a project
 - `/delete-task id:12345` - Delete a task
+- `/view-task id:12345` - View task details
+- `/help` - Show all commands
+
+### Audit System Setup
+- `/audit-setup` - **ADMIN ONLY** - Set up the Botsana audit category and channels
+
+## Audit System
+
+The Botsana audit system provides **real-time monitoring of ALL Asana activity** through webhooks and automated reporting.
+
+### Audit Channels Created by `/audit-setup`:
+
+- **#taskmaster** 📋 - All task creations and deletions
+- **#updates** 🔄 - Task updates, comments, status changes, and assignments
+- **#completed** ✅ - Tasks that have been completed
+- **#due-soon** ⏰ - Tasks due within 24 hours (checked hourly)
+- **#overdue** 🚨 - Currently overdue tasks
+- **#missed-deadline** 💀 - Tasks that missed their deadline (reported daily at 9 AM)
+- **#new-projects** 📁 - New project creations
+- **#attachments** 📎 - Files added to tasks
+
+### How It Works:
+1. **Real-time Webhooks**: Asana sends instant notifications for all activity
+2. **Automated Reporting**: Scheduled jobs check for due dates and missed deadlines
+3. **Rich Embeds**: Each event is formatted as a beautiful Discord embed
+4. **Self-Sufficient**: Channels work automatically - no manual intervention needed
+
+### Setup Instructions:
+1. Run `/audit-setup` as an Administrator in your server
+2. The bot will create the "🤖 Botsana" category and all channels
+3. Webhooks are automatically registered with Asana
+4. The system begins monitoring immediately
+
+**Note**: The audit system monitors ALL Asana activity in your workspace, not just actions performed through the bot.
 
 ## Heroku Deployment
 
