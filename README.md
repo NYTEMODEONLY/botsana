@@ -131,6 +131,7 @@ Botsana is intelligent about finding and managing tasks across your workspace. Y
 **Update a task:**
 ```
 /update-task task:"review code" assignee:@developer due_date:"2025-12-31"
+/update-task task:"task name" assignee:@nyte  # Assign to yourself
 /update-task task:"1211480509573974" name:"Updated task name"
 ```
 

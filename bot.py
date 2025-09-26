@@ -968,17 +968,32 @@ async def update_task_command(
         # Resolve assignee - handle Discord user mentions
         asana_assignee = None
         if assignee:
-            user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
-            if user_mapping:
-                asana_assignee = user_mapping['asana_user_id']
+            # Special case: if assignee is the same as the command runner, use their mapping
+            if assignee.id == interaction.user.id:
+                user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+                if user_mapping:
+                    asana_assignee = user_mapping['asana_user_id']
+                else:
+                    embed = discord.Embed(
+                        title="❌ You Are Not Mapped",
+                        description="You need to be mapped to an Asana user first. Use `/map-user @yourname` to map yourself.",
+                        color=discord.Color.red()
+                    )
+                    await interaction.followup.send(embed=embed)
+                    return
             else:
-                embed = discord.Embed(
-                    title="❌ User Not Mapped",
-                    description=f"{assignee.mention} is not mapped to an Asana user. Use `/map-user @{assignee.name}` first.",
-                    color=discord.Color.red()
-                )
-                await interaction.followup.send(embed=embed)
-                return
+                # Regular user mapping lookup
+                user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
+                if user_mapping:
+                    asana_assignee = user_mapping['asana_user_id']
+                else:
+                    embed = discord.Embed(
+                        title="❌ User Not Mapped",
+                        description=f"{assignee.mention} is not mapped to an Asana user. Use `/map-user @{assignee.name}` first.",
+                        color=discord.Color.red()
+                    )
+                    await interaction.followup.send(embed=embed)
+                    return
 
         # Validate that at least one update parameter is provided
         if not any([name, assignee, due_date, notes]):
@@ -994,7 +1009,7 @@ async def update_task_command(
             )
             embed.add_field(
                 name="Examples:",
-                value="• `/update-task task:\"fix bug\" assignee:@developer`\n• `/update-task task:\"review code\" due_date:\"2025-12-31\"`\n• `/update-task task:\"task name\" name:\"New task name\"`",
+                value="• `/update-task task:\"fix bug\" assignee:@developer`\n• `/update-task task:\"review code\" assignee:@nyte` (assign to yourself)\n• `/update-task task:\"task name\" due_date:\"2025-12-31\"`\n• `/update-task task:\"task name\" name:\"New task name\"`",
                 inline=False
             )
             await interaction.followup.send(embed=embed)
