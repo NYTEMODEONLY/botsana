@@ -29,6 +29,7 @@ class Guild(Base):
     notification_preferences = relationship("UserNotificationPreferences", back_populates="guild", cascade="all, delete-orphan")
     chat_channels = relationship("ChatChannel", back_populates="guild", cascade="all, delete-orphan")
     task_templates = relationship("TaskTemplate", back_populates="guild", cascade="all, delete-orphan")
+    time_entries = relationship("TimeEntry", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -152,6 +153,39 @@ class TaskTemplate(Base):
 
     # Relationships
     guild = relationship("Guild", back_populates="task_templates")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class TimeEntry(Base):
+    """Time tracking entries for clock in/out functionality."""
+    __tablename__ = 'time_entries'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    discord_user_id = Column(BigInteger, nullable=False)
+    discord_username = Column(String(255))  # Store username for reference
+
+    # Clock times
+    clock_in_time = Column(DateTime, nullable=False)
+    clock_out_time = Column(DateTime, nullable=True)
+
+    # Duration in seconds (calculated on clock out)
+    duration_seconds = Column(Integer, nullable=True)
+
+    # Time proof and notes
+    time_proof_link = Column(Text, nullable=True)  # URL to proof of work
+    notes = Column(Text, nullable=True)  # Optional notes
+
+    # Status and metadata
+    status = Column(String(50), default='active')  # 'active', 'completed', 'cancelled'
+    asana_task_gid = Column(String(255), nullable=True)  # Associated Asana task
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="time_entries")
 
     __table_args__ = {'sqlite_autoincrement': True}
 
@@ -572,6 +606,136 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error deleting task template: {e}")
             return False
+
+    def create_time_entry(self, guild_id: int, discord_user_id: int, discord_username: str = None) -> Optional[int]:
+        """Create a new time entry (clock in). Returns the entry ID."""
+        try:
+            with self.get_session() as session:
+                # Check if user already has an active time entry
+                active_entry = session.query(TimeEntry).filter(
+                    TimeEntry.guild_id == guild_id,
+                    TimeEntry.discord_user_id == discord_user_id,
+                    TimeEntry.status == 'active'
+                ).first()
+
+                if active_entry:
+                    # User is already clocked in, return existing entry ID
+                    return active_entry.id
+
+                # Create new time entry
+                entry = TimeEntry(
+                    guild_id=guild_id,
+                    discord_user_id=discord_user_id,
+                    discord_username=discord_username,
+                    clock_in_time=datetime.utcnow()
+                )
+                session.add(entry)
+                session.commit()
+                return entry.id
+
+        except Exception as e:
+            print(f"Error creating time entry: {e}")
+            return None
+
+    def clock_out_time_entry(self, entry_id: int, time_proof_link: str = None, notes: str = None) -> bool:
+        """Clock out a time entry with optional proof and notes."""
+        try:
+            with self.get_session() as session:
+                entry = session.query(TimeEntry).filter(TimeEntry.id == entry_id).first()
+                if not entry:
+                    return False
+
+                if entry.status != 'active':
+                    return False  # Already clocked out
+
+                now = datetime.utcnow()
+                duration = int((now - entry.clock_in_time).total_seconds())
+
+                entry.clock_out_time = now
+                entry.duration_seconds = duration
+                entry.status = 'completed'
+                entry.time_proof_link = time_proof_link
+                entry.notes = notes
+                entry.updated_at = now
+
+                session.commit()
+                return True
+
+        except Exception as e:
+            print(f"Error clocking out time entry: {e}")
+            return False
+
+    def get_active_time_entry(self, guild_id: int, discord_user_id: int) -> Optional[Dict[str, Any]]:
+        """Get the active time entry for a user."""
+        try:
+            with self.get_session() as session:
+                entry = session.query(TimeEntry).filter(
+                    TimeEntry.guild_id == guild_id,
+                    TimeEntry.discord_user_id == discord_user_id,
+                    TimeEntry.status == 'active'
+                ).first()
+
+                if entry:
+                    return {
+                        'id': entry.id,
+                        'guild_id': entry.guild_id,
+                        'discord_user_id': entry.discord_user_id,
+                        'discord_username': entry.discord_username,
+                        'clock_in_time': entry.clock_in_time,
+                        'status': entry.status,
+                        'created_at': entry.created_at
+                    }
+                return None
+
+        except Exception as e:
+            print(f"Error getting active time entry: {e}")
+            return None
+
+    def get_user_time_entries(self, guild_id: int, discord_user_id: int, limit: int = 10) -> list:
+        """Get recent time entries for a user."""
+        try:
+            with self.get_session() as session:
+                entries = session.query(TimeEntry).filter(
+                    TimeEntry.guild_id == guild_id,
+                    TimeEntry.discord_user_id == discord_user_id
+                ).order_by(TimeEntry.created_at.desc()).limit(limit).all()
+
+                return [{
+                    'id': entry.id,
+                    'clock_in_time': entry.clock_in_time,
+                    'clock_out_time': entry.clock_out_time,
+                    'duration_seconds': entry.duration_seconds,
+                    'time_proof_link': entry.time_proof_link,
+                    'notes': entry.notes,
+                    'status': entry.status,
+                    'asana_task_gid': entry.asana_task_gid,
+                    'created_at': entry.created_at
+                } for entry in entries]
+
+        except Exception as e:
+            print(f"Error getting user time entries: {e}")
+            return []
+
+    def get_all_active_entries(self, guild_id: int) -> list:
+        """Get all active time entries for a guild."""
+        try:
+            with self.get_session() as session:
+                entries = session.query(TimeEntry).filter(
+                    TimeEntry.guild_id == guild_id,
+                    TimeEntry.status == 'active'
+                ).order_by(TimeEntry.clock_in_time).all()
+
+                return [{
+                    'id': entry.id,
+                    'discord_user_id': entry.discord_user_id,
+                    'discord_username': entry.discord_username,
+                    'clock_in_time': entry.clock_in_time,
+                    'created_at': entry.created_at
+                } for entry in entries]
+
+        except Exception as e:
+            print(f"Error getting active entries: {e}")
+            return []
 
 # Global database manager instance
 db_manager = DatabaseManager()

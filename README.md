@@ -10,6 +10,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - **Comprehensive Audit System** - Real-time monitoring of ALL Asana activity
 - **🤖 AI-Powered Natural Language** - Create tasks using conversational language
 - **⚙️ Bulk Operations** - Select and operate on multiple tasks at once
+- **📋 Task Templates** - Save and reuse common task configurations
 - **🔔 Smart Notifications** - Personalized due date reminders and assignment alerts
 - Secure environment variable handling
 - Ready for Heroku deployment
@@ -64,6 +65,12 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/set-chat-channel #channel` - Designate a channel for AI chat (Admin only)
 - `/bulk-select search:"bug" limit:10` - Select multiple tasks for batch operations
 - `/notification-settings` - Manage your notification preferences
+
+### 📋 Task Templates
+- `/create-template name:"Bug Report" task_name:"🐛 Bug: {description}"` - Create reusable task configurations
+- `/list-templates` - Browse available task templates
+- `/use-template template:"Bug Report" custom_name:"🐛 Login issue"` - Create tasks from saved templates
+- `/delete-template template:"Bug Report"` - Remove templates (Admin only)
 
 ### Audit System Setup
 - `/audit-setup` - **ADMIN ONLY** - Set up the Botsana audit category and channels
@@ -233,6 +240,60 @@ After parsing your request, Botsana replies with exactly what it understood and 
 - **Check Status**: `/status` shows if chat channel is configured
 
 The bot only responds to @mentions in the designated channel, keeping regular conversation unaffected.
+
+## 📋 Task Templates
+
+Create reusable task configurations to standardize common workflows and save time.
+
+### Creating Templates
+
+Use `/create-template` to save task configurations for reuse:
+
+```
+/create-template name:"Bug Report" task_name:"🐛 Bug: {description}" assignee:@developer due_date_offset:3 notes:"Reported by: {reporter}\nPriority: {priority}\nSteps to reproduce:\n{steps}"
+```
+
+**Template Features:**
+- **Custom task names** with variables like `{description}`, `{priority}`
+- **Default assignees** and projects
+- **Automatic due dates** (e.g., 3 days from creation)
+- **Template descriptions** and usage notes
+- **Usage tracking** and statistics
+
+### Using Templates
+
+Create tasks instantly from templates:
+
+```
+/use-template template:"Bug Report" custom_name:"🐛 Login button not working" notes:"User cannot click login after entering credentials"
+```
+
+**Override Options:**
+- **custom_name**: Override the default task name
+- **assignee**: Assign to different user
+- **project**: Use different project
+- **due_date**: Set specific due date
+- **notes**: Add custom notes (appended to template notes)
+
+### Managing Templates
+
+- **`/list-templates`**: Browse all available templates
+- **`/use-template`**: Create tasks from templates
+- **`/delete-template`** (Admin): Remove templates
+
+### Template Statistics
+
+Templates track usage statistics:
+- How many times each template has been used
+- Who created each template
+- When templates were last used
+
+**Perfect for standardizing:**
+- Bug reports
+- Feature requests
+- Support tickets
+- Recurring tasks
+- Department workflows
 
 ## ⚙️ Bulk Task Operations
 

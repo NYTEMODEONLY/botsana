@@ -1581,6 +1581,16 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="🕐 Time Tracking",
+        value="""`clock-in` - Start tracking work time
+`clock-out` - End session with time proof link
+`time-status` - Check your current time tracking status
+`time-history` - View your recent time entries
+`timeclock-status` - View all active sessions (Admin only)""",
+        inline=False
+    )
+
+    embed.add_field(
         name="⚙️ Configuration (Admin Only)",
         value="""`set-chat-channel` - Designate a channel for AI chat
 `remove-chat-channel` - Disable AI chat channel
@@ -2983,6 +2993,478 @@ async def delete_template_error(interaction: discord.Interaction, error):
     else:
         logger.error(f"Delete template error: {error}")
 
+@bot.tree.command(name="clock-in", description="Clock in to start tracking work time")
+async def clock_in_command(interaction: discord.Interaction):
+    """Clock in to start tracking work time."""
+    await interaction.response.defer()
+
+    try:
+        # Check if user is already clocked in
+        active_entry = db_manager.get_active_time_entry(interaction.guild.id, interaction.user.id)
+
+        if active_entry:
+            # User is already clocked in
+            clock_in_time = active_entry['clock_in_time']
+            duration = datetime.utcnow() - clock_in_time.replace(tzinfo=None)
+
+            embed = discord.Embed(
+                title="⚠️ Already Clocked In",
+                description="You are already clocked in for work.",
+                color=discord.Color.yellow()
+            )
+
+            embed.add_field(
+                name="🕐 Clock In Time",
+                value=f"<t:{int(clock_in_time.timestamp())}:F>",
+                inline=True
+            )
+
+            embed.add_field(
+                name="⏱️ Current Session",
+                value=format_duration(int(duration.total_seconds())),
+                inline=True
+            )
+
+            embed.add_field(
+                name="💡 To Clock Out",
+                value="Use `/clock-out` with your time proof link",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Clock in the user
+        entry_id = db_manager.create_time_entry(
+            guild_id=interaction.guild.id,
+            discord_user_id=interaction.user.id,
+            discord_username=str(interaction.user)
+        )
+
+        if entry_id:
+            embed = discord.Embed(
+                title="🕐 Successfully Clocked In!",
+                description="Your work session has started.",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="👤 Employee",
+                value=interaction.user.mention,
+                inline=True
+            )
+
+            embed.add_field(
+                name="🕐 Start Time",
+                value=f"<t:{int(datetime.utcnow().timestamp())}:F>",
+                inline=True
+            )
+
+            embed.add_field(
+                name="📍 Location",
+                value=f"#{interaction.channel.name}" if hasattr(interaction.channel, 'name') else "Direct Message",
+                inline=True
+            )
+
+            embed.set_footer(text="Use /clock-out when finished to log your time")
+
+            await interaction.followup.send(embed=embed)
+
+            # Log the clock in event
+            await error_logger.log_system_event(
+                "clock_in",
+                f"{interaction.user.display_name} clocked in",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "entry_id": entry_id},
+                "INFO"
+            )
+
+            # Create Asana task for time tracking
+            await create_timeclock_asana_task(interaction, entry_id, "clock_in")
+
+        else:
+            embed = discord.Embed(
+                title="❌ Clock In Failed",
+                description="Failed to clock you in. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "clock-in")
+
+        embed = discord.Embed(
+            title="❌ Clock In Failed",
+            description=f"An error occurred while clocking in: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="clock-out", description="Clock out and provide time proof link")
+@app_commands.describe(
+    time_proof_link="Link to your work proof (Google Sheets, screenshots, etc.)",
+    notes="Optional notes about your work session"
+)
+async def clock_out_command(
+    interaction: discord.Interaction,
+    time_proof_link: str,
+    notes: Optional[str] = None
+):
+    """Clock out with time proof link."""
+    await interaction.response.defer()
+
+    try:
+        # Check if user is clocked in
+        active_entry = db_manager.get_active_time_entry(interaction.guild.id, interaction.user.id)
+
+        if not active_entry:
+            embed = discord.Embed(
+                title="❌ Not Clocked In",
+                description="You are not currently clocked in. Use `/clock-in` to start your work session.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Validate time proof link
+        if not time_proof_link.startswith(('http://', 'https://')):
+            embed = discord.Embed(
+                title="❌ Invalid Time Proof Link",
+                description="Please provide a valid URL for your time proof (must start with http:// or https://).",
+                color=discord.Color.red()
+            )
+            embed.add_field(
+                name="💡 Examples",
+                value="• Google Sheets: `https://docs.google.com/spreadsheets/...`\n• Screenshots: `https://imgur.com/...`\n• Documents: `https://drive.google.com/...`",
+                inline=False
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Clock out the user
+        success = db_manager.clock_out_time_entry(
+            entry_id=active_entry['id'],
+            time_proof_link=time_proof_link,
+            notes=notes
+        )
+
+        if success:
+            # Get the completed entry to show duration
+            completed_entries = db_manager.get_user_time_entries(interaction.guild.id, interaction.user.id, limit=1)
+            if completed_entries:
+                entry = completed_entries[0]
+                duration = format_duration(entry['duration_seconds'])
+
+                embed = discord.Embed(
+                    title="🕐 Successfully Clocked Out!",
+                    description="Your work session has ended.",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
+                )
+
+                embed.add_field(
+                    name="👤 Employee",
+                    value=interaction.user.mention,
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="⏱️ Session Duration",
+                    value=duration,
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="🕐 Clock In",
+                    value=f"<t:{int(entry['clock_in_time'].timestamp())}:t>",
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="🕐 Clock Out",
+                    value=f"<t:{int(entry['clock_out_time'].timestamp())}:t>",
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="🔗 Time Proof",
+                    value=f"[View Proof]({time_proof_link})",
+                    inline=False
+                )
+
+                if notes:
+                    embed.add_field(
+                        name="📝 Notes",
+                        value=notes,
+                        inline=False
+                    )
+
+                embed.set_footer(text=f"Entry ID: {entry['id']} • Have a great day!")
+
+                await interaction.followup.send(embed=embed)
+
+                # Log the clock out event
+                await error_logger.log_system_event(
+                    "clock_out",
+                    f"{interaction.user.display_name} clocked out after {duration}",
+                    {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "entry_id": active_entry['id'], "duration": duration, "time_proof": time_proof_link},
+                    "INFO"
+                )
+
+                # Update Asana task with clock out info
+                await create_timeclock_asana_task(interaction, active_entry['id'], "clock_out", time_proof_link, notes)
+
+            else:
+                # Fallback success message
+                embed = discord.Embed(
+                    title="🕐 Successfully Clocked Out!",
+                    description="Your work session has ended and time proof has been logged.",
+                    color=discord.Color.green()
+                )
+                embed.add_field(
+                    name="🔗 Time Proof",
+                    value=f"[View Proof]({time_proof_link})",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed)
+
+        else:
+            embed = discord.Embed(
+                title="❌ Clock Out Failed",
+                description="Failed to clock you out. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "clock-out")
+
+        embed = discord.Embed(
+            title="❌ Clock Out Failed",
+            description=f"An error occurred while clocking out: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="time-status", description="Check your current time tracking status")
+async def time_status_command(interaction: discord.Interaction):
+    """Check current time tracking status."""
+    await interaction.response.defer()
+
+    try:
+        # Check if user is currently clocked in
+        active_entry = db_manager.get_active_time_entry(interaction.guild.id, interaction.user.id)
+
+        if active_entry:
+            # User is clocked in
+            clock_in_time = active_entry['clock_in_time']
+            current_duration = datetime.utcnow() - clock_in_time.replace(tzinfo=None)
+
+            embed = discord.Embed(
+                title="🕐 Currently Clocked In",
+                description="You are actively tracking time.",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="🕐 Clock In Time",
+                value=f"<t:{int(clock_in_time.timestamp())}:F>",
+                inline=True
+            )
+
+            embed.add_field(
+                name="⏱️ Current Session",
+                value=format_duration(int(current_duration.total_seconds())),
+                inline=True
+            )
+
+            embed.add_field(
+                name="📊 Today's Total",
+                value=await get_today_total_time(interaction.guild.id, interaction.user.id),
+                inline=True
+            )
+
+            embed.add_field(
+                name="💡 To Clock Out",
+                value="Use `/clock-out time_proof_link:\"https://...\"` when finished",
+                inline=False
+            )
+
+        else:
+            # User is not clocked in - show recent sessions
+            recent_entries = db_manager.get_user_time_entries(interaction.guild.id, interaction.user.id, limit=3)
+
+            embed = discord.Embed(
+                title="🕐 Not Currently Clocked In",
+                description="Use `/clock-in` to start tracking time.",
+                color=discord.Color.blue()
+            )
+
+            embed.add_field(
+                name="📊 Today's Total",
+                value=await get_today_total_time(interaction.guild.id, interaction.user.id),
+                inline=True
+            )
+
+            if recent_entries:
+                embed.add_field(
+                    name="🕐 Recent Sessions",
+                    value="\n".join([
+                        f"• {entry['clock_in_time'].strftime('%m/%d')} {format_duration(entry['duration_seconds'] or 0)}"
+                        for entry in recent_entries[:3]
+                    ]),
+                    inline=False
+                )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "time-status")
+
+        embed = discord.Embed(
+            title="❌ Status Check Failed",
+            description=f"Could not check your time status: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="time-history", description="View your recent time tracking history")
+@app_commands.describe(
+    limit="Number of recent entries to show (default: 5, max: 10)"
+)
+async def time_history_command(interaction: discord.Interaction, limit: Optional[int] = 5):
+    """View recent time tracking history."""
+    await interaction.response.defer()
+
+    try:
+        if limit > 10:
+            limit = 10
+        elif limit < 1:
+            limit = 1
+
+        entries = db_manager.get_user_time_entries(interaction.guild.id, interaction.user.id, limit=limit)
+
+        if not entries:
+            embed = discord.Embed(
+                title="📊 Time History",
+                description="No time entries found. Use `/clock-in` to start tracking time.",
+                color=discord.Color.blue()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title="📊 Time Tracking History",
+            description=f"Your last {len(entries)} time entr{'y' if len(entries) == 1 else 'ies'}",
+            color=discord.Color.blue()
+        )
+
+        total_time = 0
+        for entry in entries:
+            if entry['status'] == 'completed' and entry['duration_seconds']:
+                total_time += entry['duration_seconds']
+
+                entry_info = f"🕐 <t:{int(entry['clock_in_time'].timestamp())}:D>\n"
+                entry_info += f"⏱️ {format_duration(entry['duration_seconds'])}\n"
+                if entry['time_proof_link']:
+                    entry_info += f"🔗 [Proof]({entry['time_proof_link']})"
+
+                embed.add_field(
+                    name=f"Session #{entry['id']}",
+                    value=entry_info,
+                    inline=True
+                )
+
+        # Add summary
+        embed.add_field(
+            name="📈 Summary",
+            value=f"**Total Sessions:** {len([e for e in entries if e['status'] == 'completed'])}\n"
+                  f"**Total Time:** {format_duration(total_time)}\n"
+                  f"**Average Session:** {format_duration(total_time // max(1, len([e for e in entries if e['status'] == 'completed'])))}",
+            inline=False
+        )
+
+        embed.set_footer(text="Use /clock-in to start a new session")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "time-history")
+
+        embed = discord.Embed(
+            title="❌ History Check Failed",
+            description=f"Could not load your time history: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="timeclock-status", description="View all currently active time clock sessions (Admin only)")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def timeclock_status_command(interaction: discord.Interaction):
+    """View all currently active time clock sessions."""
+    await interaction.response.defer()
+
+    try:
+        active_entries = db_manager.get_all_active_entries(interaction.guild.id)
+
+        embed = discord.Embed(
+            title="🕐 Active Time Clock Sessions",
+            description=f"Currently {len(active_entries)} user{' is' if len(active_entries) == 1 else 's are'} clocked in",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        if active_entries:
+            for entry in active_entries[:10]:  # Limit to 10 for embed size
+                user = interaction.guild.get_member(entry['discord_user_id'])
+                username = user.display_name if user else entry['discord_username'] or f"User {entry['discord_user_id']}"
+
+                clock_in_duration = datetime.utcnow() - entry['clock_in_time'].replace(tzinfo=None)
+
+                embed.add_field(
+                    name=username,
+                    value=f"🕐 Clocked in: <t:{int(entry['clock_in_time'].timestamp())}:R>\n"
+                          f"⏱️ Duration: {format_duration(int(clock_in_duration.total_seconds()))}",
+                    inline=True
+                )
+
+            if len(active_entries) > 10:
+                embed.set_footer(text=f"Showing first 10 of {len(active_entries)} active sessions")
+        else:
+            embed.add_field(
+                name="📊 Status",
+                value="No users are currently clocked in",
+                inline=False
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "timeclock-status")
+
+        embed = discord.Embed(
+            title="❌ Status Check Failed",
+            description=f"Could not load active sessions: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@timeclock_status_command.error
+async def timeclock_status_error(interaction: discord.Interaction, error):
+    """Handle timeclock status command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to view all active time clock sessions.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Timeclock status error: {error}")
+
 @bot.tree.command(name="bulk-select", description="Select multiple tasks for batch operations (complete, update, etc.)")
 @app_commands.describe(
     search="Search term to find tasks (optional - shows recent tasks if empty)",
@@ -4371,6 +4853,145 @@ def get_time_until_due(due_date_str: str) -> str:
 
     except Exception:
         return "Unknown"
+
+def format_duration(seconds: int) -> str:
+    """Format seconds into human readable duration."""
+    if seconds < 60:
+        return f"{seconds}s"
+
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m {seconds % 60}s"
+
+    hours = minutes // 60
+    minutes = minutes % 60
+
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+
+    days = hours // 24
+    hours = hours % 24
+
+    return f"{days}d {hours}h {minutes}m"
+
+async def get_today_total_time(guild_id: int, discord_user_id: int) -> str:
+    """Get total time worked today for a user."""
+    try:
+        from datetime import date
+
+        today = date.today()
+        today_start = datetime.combine(today, datetime.min.time())
+
+        # Get all entries for today
+        with db_manager.get_session() as session:
+            entries = session.query(TimeEntry).filter(
+                TimeEntry.guild_id == guild_id,
+                TimeEntry.discord_user_id == discord_user_id,
+                TimeEntry.clock_in_time >= today_start,
+                TimeEntry.status == 'completed'
+            ).all()
+
+            total_seconds = sum(entry.duration_seconds or 0 for entry in entries)
+            return format_duration(total_seconds)
+
+    except Exception as e:
+        logger.error(f"Error calculating today's total time: {e}")
+        return "Unknown"
+
+async def create_timeclock_asana_task(interaction, entry_id: int, event_type: str, time_proof_link: str = None, notes: str = None):
+    """Create or update Asana task for timeclock events."""
+    try:
+        # Try to find or create a "timeclock" project in Asana
+        timeclock_project_name = "TimeClock"
+
+        # Check if project already exists
+        try:
+            projects = asana_client.projects.get_projects({'workspace': ASANA_WORKSPACE_ID})
+            timeclock_project = None
+
+            for project in projects:
+                if project['name'].lower() == timeclock_project_name.lower():
+                    timeclock_project = project
+                    break
+
+            # Create project if it doesn't exist
+            if not timeclock_project:
+                timeclock_project = asana_client.projects.create_project({
+                    'name': timeclock_project_name,
+                    'workspace': ASANA_WORKSPACE_ID,
+                    'notes': 'Automated time tracking for Discord timeclock sessions'
+                })
+                logger.info(f"Created Asana project: {timeclock_project_name}")
+
+        except Exception as e:
+            logger.warning(f"Could not create/access Asana timeclock project: {e}")
+            return
+
+        # Get time entry details
+        with db_manager.get_session() as session:
+            entry = session.query(TimeEntry).filter(TimeEntry.id == entry_id).first()
+            if not entry:
+                return
+
+            # Create task name based on event type
+            if event_type == "clock_in":
+                task_name = f"🕐 {entry.discord_username or 'Unknown User'} - Time Session Started"
+                task_notes = f"**Clock In Event**\n"
+                task_notes += f"**Employee:** {entry.discord_username or 'Unknown User'}\n"
+                task_notes += f"**Start Time:** {entry.clock_in_time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                task_notes += f"**Discord User ID:** {entry.discord_user_id}\n"
+                task_notes += f"**Entry ID:** {entry.id}\n\n"
+                task_notes += "This task will be updated when the user clocks out."
+
+            elif event_type == "clock_out":
+                task_name = f"🕐 {entry.discord_username or 'Unknown User'} - Time Session Completed"
+                duration = format_duration(entry.duration_seconds or 0)
+                task_notes = f"**Clock Out Event**\n"
+                task_notes += f"**Employee:** {entry.discord_username or 'Unknown User'}\n"
+                task_notes += f"**Start Time:** {entry.clock_in_time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                task_notes += f"**End Time:** {entry.clock_out_time.strftime('%Y-%m-%d %H:%M:%S UTC') if entry.clock_out_time else 'Unknown'}\n"
+                task_notes += f"**Duration:** {duration}\n"
+                task_notes += f"**Discord User ID:** {entry.discord_user_id}\n"
+                task_notes += f"**Entry ID:** {entry.id}\n"
+
+                if time_proof_link:
+                    task_notes += f"**Time Proof:** {time_proof_link}\n"
+
+                if notes:
+                    task_notes += f"**Notes:** {notes}\n"
+
+                if entry.duration_seconds:
+                    # Mark task as completed if session was over 30 minutes
+                    if entry.duration_seconds > 1800:  # 30 minutes
+                        task_notes += f"\n**Status:** Completed session ({duration})"
+
+            else:
+                return
+
+            # Create Asana task
+            task_data = {
+                'name': task_name,
+                'notes': task_notes,
+                'projects': [timeclock_project['gid']],
+                'workspace': ASANA_WORKSPACE_ID
+            }
+
+            # Try to assign to Asana user if mapped
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, entry.discord_user_id)
+            if user_mapping:
+                task_data['assignee'] = user_mapping['asana_user_id']
+
+            # Create the task
+            asana_task = asana_client.tasks.create_task(task_data)
+
+            # Update the time entry with the Asana task ID
+            entry.asana_task_gid = asana_task['gid']
+            session.commit()
+
+            logger.info(f"Created Asana task for time entry {entry_id}: {asana_task['gid']}")
+
+    except Exception as e:
+        logger.error(f"Error creating Asana task for timeclock event: {e}")
 
 # Chat Channel Message Handling
 async def handle_chat_channel_request(message):
