@@ -1309,11 +1309,15 @@ async def reset_database_command(interaction: discord.Interaction):
             await interaction.followup.send("🔄 Resetting database... This may take a moment.")
 
             try:
-                # Drop all tables
+                # Drop all tables in correct order (to handle foreign keys)
                 from database import Base
                 Base.metadata.drop_all(bind=db_manager.engine)
 
-                # Recreate all tables
+                # Small delay to ensure tables are dropped
+                import time
+                time.sleep(1)
+
+                # Recreate all tables with correct schema
                 Base.metadata.create_all(bind=db_manager.engine)
 
                 embed = discord.Embed(
@@ -1323,8 +1327,14 @@ async def reset_database_command(interaction: discord.Interaction):
                 )
 
                 embed.add_field(
+                    name="What Was Fixed:",
+                    value="• Database schema updated to BIGINT for Discord IDs\n• All tables recreated with correct field types\n• Foreign key constraints properly set up",
+                    inline=False
+                )
+
+                embed.add_field(
                     name="Next Steps:",
-                    value="• Run `/set-audit-log` to configure error logging\n• Run `/set-default-project` to set default project\n• Bot configurations need to be re-set",
+                    value="• Run `/set-audit-log #channel` to configure error logging\n• Run `/set-default-project <id>` to set default project\n• Run `/status` to verify everything works",
                     inline=False
                 )
 
