@@ -1591,6 +1591,13 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="⚙️ Timeclock Channel (Admin Only)",
+        value="""`set-timeclock-channel` - Designate channel for time tracking
+`remove-timeclock-channel` - Remove timeclock channel restriction""",
+        inline=False
+    )
+
+    embed.add_field(
         name="⚙️ Configuration (Admin Only)",
         value="""`set-chat-channel` - Designate a channel for AI chat
 `remove-chat-channel` - Disable AI chat channel
@@ -2548,6 +2555,191 @@ async def remove_chat_channel_error(interaction: discord.Interaction, error):
     else:
         logger.error(f"Remove chat channel error: {error}")
 
+@bot.tree.command(name="set-timeclock-channel", description="Designate a channel for time tracking (Admin only)")
+@discord.app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    channel="The channel to designate for time tracking commands"
+)
+async def set_timeclock_channel_command(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Set the designated channel for time tracking."""
+    await interaction.response.defer()
+
+    try:
+        # Check if a timeclock channel is already set
+        existing = db_manager.get_timeclock_channel(interaction.guild.id)
+
+        success = db_manager.set_timeclock_channel(
+            guild_id=interaction.guild.id,
+            channel_id=channel.id,
+            channel_name=channel.name,
+            created_by=interaction.user.id
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Timeclock Channel Set",
+                description=f"Time tracking commands are now restricted to {channel.mention}",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="📍 Channel",
+                value=f"{channel.mention} (`#{channel.name}`)",
+                inline=True
+            )
+
+            embed.add_field(
+                name="👤 Set By",
+                value=interaction.user.mention,
+                inline=True
+            )
+
+            embed.add_field(
+                name="🕐 Commands Available",
+                value="• `/clock-in`\n• `/clock-out`\n• `/time-status`\n• `/time-history`",
+                inline=False
+            )
+
+            if existing:
+                embed.add_field(
+                    name="ℹ️ Previous Channel",
+                    value=f"Replaced previous designation",
+                    inline=True
+                )
+
+            embed.set_footer(text="Only these commands will work in the designated timeclock channel")
+
+            await interaction.followup.send(embed=embed)
+
+            # Log the channel setting
+            await error_logger.log_system_event(
+                "timeclock_channel_set",
+                f"Timeclock channel set to #{channel.name} by {interaction.user.display_name}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "channel_id": channel.id, "channel_name": channel.name},
+                "INFO"
+            )
+
+        else:
+            embed = discord.Embed(
+                title="❌ Failed to Set Channel",
+                description="Could not set the timeclock channel. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "set-timeclock-channel")
+
+        embed = discord.Embed(
+            title="❌ Channel Setup Failed",
+            description=f"An error occurred while setting the channel: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="remove-timeclock-channel", description="Remove the designated timeclock channel (Admin only)")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def remove_timeclock_channel_command(interaction: discord.Interaction):
+    """Remove the designated timeclock channel."""
+    await interaction.response.defer()
+
+    try:
+        existing = db_manager.get_timeclock_channel(interaction.guild.id)
+
+        if not existing:
+            embed = discord.Embed(
+                title="❌ No Timeclock Channel Set",
+                description="There is no timeclock channel currently designated for this server.",
+                color=discord.Color.yellow()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        success = db_manager.remove_timeclock_channel(interaction.guild.id)
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Timeclock Channel Removed",
+                description="Time tracking commands are now available in all channels",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="👤 Removed By",
+                value=interaction.user.mention,
+                inline=True
+            )
+
+            embed.add_field(
+                name="ℹ️ Commands Now Available",
+                value="Time tracking commands can now be used in any channel",
+                inline=False
+            )
+
+            embed.set_footer(text="Use /set-timeclock-channel to designate a specific channel again")
+
+            await interaction.followup.send(embed=embed)
+
+            # Log the channel removal
+            await error_logger.log_system_event(
+                "timeclock_channel_removed",
+                f"Timeclock channel removed by {interaction.user.display_name}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id},
+                "WARNING"
+            )
+
+        else:
+            embed = discord.Embed(
+                title="❌ Failed to Remove Channel",
+                description="Could not remove the timeclock channel. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "remove-timeclock-channel")
+
+        embed = discord.Embed(
+            title="❌ Channel Removal Failed",
+            description=f"An error occurred while removing the channel: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@remove_timeclock_channel_command.error
+async def remove_timeclock_channel_error(interaction: discord.Interaction, error):
+    """Handle remove timeclock channel command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to remove the timeclock channel.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Remove timeclock channel error: {error}")
+
+@set_timeclock_channel_command.error
+async def set_timeclock_channel_error(interaction: discord.Interaction, error):
+    """Handle set timeclock channel command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to set the timeclock channel.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Set timeclock channel error: {error}")
+
 @bot.tree.command(name="create-template", description="Create a reusable task template")
 @app_commands.describe(
     name="Template name (e.g., 'Bug Report', 'Feature Request')",
@@ -2996,6 +3188,10 @@ async def delete_template_error(interaction: discord.Interaction, error):
 @bot.tree.command(name="clock-in", description="Clock in to start tracking work time")
 async def clock_in_command(interaction: discord.Interaction):
     """Clock in to start tracking work time."""
+    # Check if command is being used in the designated timeclock channel
+    if not check_timeclock_channel(interaction):
+        return
+
     await interaction.response.defer()
 
     try:
@@ -3111,6 +3307,10 @@ async def clock_out_command(
     notes: Optional[str] = None
 ):
     """Clock out with time proof link."""
+    # Check if command is being used in the designated timeclock channel
+    if not check_timeclock_channel(interaction):
+        return
+
     await interaction.response.defer()
 
     try:
@@ -3249,6 +3449,10 @@ async def clock_out_command(
 @bot.tree.command(name="time-status", description="Check your current time tracking status")
 async def time_status_command(interaction: discord.Interaction):
     """Check current time tracking status."""
+    # Check if command is being used in the designated timeclock channel
+    if not check_timeclock_channel(interaction):
+        return
+
     await interaction.response.defer()
 
     try:
@@ -3334,6 +3538,10 @@ async def time_status_command(interaction: discord.Interaction):
 )
 async def time_history_command(interaction: discord.Interaction, limit: Optional[int] = 5):
     """View recent time tracking history."""
+    # Check if command is being used in the designated timeclock channel
+    if not check_timeclock_channel(interaction):
+        return
+
     await interaction.response.defer()
 
     try:
@@ -4873,6 +5081,45 @@ def format_duration(seconds: int) -> str:
     hours = hours % 24
 
     return f"{days}d {hours}h {minutes}m"
+
+def check_timeclock_channel(interaction: discord.Interaction) -> bool:
+    """Check if the command is being used in the designated timeclock channel."""
+    timeclock_channel = db_manager.get_timeclock_channel(interaction.guild.id)
+
+    if timeclock_channel and interaction.channel.id != timeclock_channel['channel_id']:
+        # Get the channel object for mention
+        channel = interaction.guild.get_channel(timeclock_channel['channel_id'])
+        channel_mention = f"#{timeclock_channel['channel_name']}" if channel else f"#{timeclock_channel['channel_name']}"
+
+        embed = discord.Embed(
+            title="❌ Wrong Channel",
+            description="Time tracking commands can only be used in the designated timeclock channel.",
+            color=discord.Color.red()
+        )
+
+        embed.add_field(
+            name="📍 Designated Channel",
+            value=channel_mention,
+            inline=True
+        )
+
+        embed.add_field(
+            name="🕐 Available Commands",
+            value="• `/clock-in`\n• `/clock-out`\n• `/time-status`\n• `/time-history`",
+            inline=False
+        )
+
+        embed.set_footer(text="Use /set-timeclock-channel to change the designated channel (Admin only)")
+
+        # Send response without deferring since we're rejecting the command
+        if not interaction.response.is_done():
+            interaction.response.send_message(embed=embed)
+        else:
+            interaction.followup.send(embed=embed)
+
+        return False
+
+    return True
 
 async def get_today_total_time(guild_id: int, discord_user_id: int) -> str:
     """Get total time worked today for a user."""

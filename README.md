@@ -80,6 +80,10 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/time-history limit:5` - View recent time entries and history
 - `/timeclock-status` - View all currently active sessions (Admin only)
 
+### 🕐 Timeclock Channel (Admin Only)
+- `/set-timeclock-channel #timeclock` - Designate channel for time tracking commands
+- `/remove-timeclock-channel` - Remove channel restriction (commands work everywhere)
+
 ### Audit System Setup
 - `/audit-setup` - **ADMIN ONLY** - Set up the Botsana audit category and channels
 - `/set-audit-log` - **ADMIN ONLY** - Configure the error logging channel
@@ -309,7 +313,14 @@ Track work hours with virtual assistants using a dedicated #timeclock channel an
 
 ### Getting Started
 
-Create a `#timeclock` channel in your Discord server for time tracking commands.
+Create a `#timeclock` channel in your Discord server and designate it for time tracking:
+
+**`/set-timeclock-channel #timeclock`** (Admin only)
+- Restricts all time tracking commands to the designated channel
+- Ensures time tracking happens in an organized location
+- Can be changed or removed later with `/remove-timeclock-channel`
+
+Once set, all time tracking commands will only work in the designated channel.
 
 ### Clock In/Out Commands
 

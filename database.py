@@ -30,6 +30,7 @@ class Guild(Base):
     chat_channels = relationship("ChatChannel", back_populates="guild", cascade="all, delete-orphan")
     task_templates = relationship("TaskTemplate", back_populates="guild", cascade="all, delete-orphan")
     time_entries = relationship("TimeEntry", back_populates="guild", cascade="all, delete-orphan")
+    timeclock_channels = relationship("TimeclockChannel", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -128,6 +129,23 @@ class ChatChannel(Base):
 
     # Relationships
     guild = relationship("Guild", back_populates="chat_channels")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class TimeclockChannel(Base):
+    """Designated channel for time tracking clock in/out."""
+    __tablename__ = 'timeclock_channels'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    channel_id = Column(BigInteger, nullable=False)  # Discord channel ID
+    channel_name = Column(String(255))  # Store channel name for reference
+    created_by = Column(BigInteger, nullable=False)  # Discord user who set it
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="timeclock_channels")
 
     __table_args__ = {'sqlite_autoincrement': True}
 
@@ -605,6 +623,63 @@ class DatabaseManager:
                 return False
         except Exception as e:
             print(f"Error deleting task template: {e}")
+            return False
+
+    def get_timeclock_channel(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        """Get the designated timeclock channel for a guild."""
+        try:
+            with self.get_session() as session:
+                channel = session.query(TimeclockChannel).filter(TimeclockChannel.guild_id == guild_id).first()
+                if channel:
+                    return {
+                        'id': channel.id,
+                        'guild_id': channel.guild_id,
+                        'channel_id': channel.channel_id,
+                        'channel_name': channel.channel_name,
+                        'created_by': channel.created_by,
+                        'created_at': channel.created_at,
+                        'updated_at': channel.updated_at
+                    }
+                return None
+        except Exception as e:
+            print(f"Error getting timeclock channel: {e}")
+            return None
+
+    def set_timeclock_channel(self, guild_id: int, channel_id: int, channel_name: str = None, created_by: int = None) -> bool:
+        """Set the designated timeclock channel for a guild."""
+        try:
+            with self.get_session() as session:
+                # Remove any existing timeclock channel for this guild
+                existing = session.query(TimeclockChannel).filter(TimeclockChannel.guild_id == guild_id).first()
+                if existing:
+                    session.delete(existing)
+
+                # Create new timeclock channel
+                channel = TimeclockChannel(
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    created_by=created_by
+                )
+                session.add(channel)
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error setting timeclock channel: {e}")
+            return False
+
+    def remove_timeclock_channel(self, guild_id: int) -> bool:
+        """Remove the designated timeclock channel for a guild."""
+        try:
+            with self.get_session() as session:
+                channel = session.query(TimeclockChannel).filter(TimeclockChannel.guild_id == guild_id).first()
+                if channel:
+                    session.delete(channel)
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error removing timeclock channel: {e}")
             return False
 
     def create_time_entry(self, guild_id: int, discord_user_id: int, discord_username: str = None) -> Optional[int]:
