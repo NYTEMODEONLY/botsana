@@ -1572,6 +1572,15 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="📋 Task Templates",
+        value="""`create-template` - Create reusable task configurations
+`list-templates` - Browse available task templates
+`use-template` - Create tasks from saved templates
+`delete-template` - Remove templates (Admin only)""",
+        inline=False
+    )
+
+    embed.add_field(
         name="⚙️ Configuration (Admin Only)",
         value="""`set-chat-channel` - Designate a channel for AI chat
 `remove-chat-channel` - Disable AI chat channel
@@ -2528,6 +2537,451 @@ async def remove_chat_channel_error(interaction: discord.Interaction, error):
             await interaction.followup.send(embed=embed)
     else:
         logger.error(f"Remove chat channel error: {error}")
+
+@bot.tree.command(name="create-template", description="Create a reusable task template")
+@app_commands.describe(
+    name="Template name (e.g., 'Bug Report', 'Feature Request')",
+    task_name="Default task name with optional variables like {description} or {priority}",
+    description="Template description for users",
+    assignee="Default assignee Discord user (optional)",
+    project="Default Asana project ID (optional)",
+    due_date_offset="Days from creation date (e.g., 7 for 1 week)",
+    notes="Default task description/notes (optional)"
+)
+async def create_template_command(
+    interaction: discord.Interaction,
+    name: str,
+    task_name: str,
+    description: str = None,
+    assignee: Optional[discord.Member] = None,
+    project: Optional[str] = None,
+    due_date_offset: Optional[int] = None,
+    notes: Optional[str] = None
+):
+    """Create a reusable task template."""
+    await interaction.response.defer()
+
+    try:
+        # Validate due date offset
+        if due_date_offset and (due_date_offset < 0 or due_date_offset > 365):
+            embed = discord.Embed(
+                title="❌ Invalid Due Date Offset",
+                description="Due date offset must be between 0 and 365 days.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Resolve assignee to Asana user ID
+        asana_assignee = None
+        if assignee:
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
+            if user_mapping:
+                asana_assignee = user_mapping['asana_user_id']
+            else:
+                embed = discord.Embed(
+                    title="⚠️ User Not Mapped",
+                    description=f"{assignee.mention} is not mapped to an Asana user. The template will be created without a default assignee.",
+                    color=discord.Color.yellow()
+                )
+                await interaction.followup.send(embed=embed)
+
+        # Validate project ID if provided
+        if project:
+            try:
+                project_info = asana_client.projects.get_project(project)
+                project_name = project_info['name']
+            except Exception:
+                embed = discord.Embed(
+                    title="❌ Invalid Project ID",
+                    description=f"Could not find Asana project with ID `{project}`. Please check the ID and try again.",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+        # Create the template
+        success = db_manager.create_task_template(
+            guild_id=interaction.guild.id,
+            name=name,
+            task_name_template=task_name,
+            description=description,
+            default_assignee=asana_assignee,
+            default_project=project,
+            default_notes=notes,
+            due_date_offset=due_date_offset,
+            created_by=interaction.user.id
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Task Template Created",
+                description=f"Template **{name}** has been created and is ready to use!",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="📝 Task Name Template",
+                value=f"`{task_name}`",
+                inline=False
+            )
+
+            if description:
+                embed.add_field(
+                    name="📋 Description",
+                    value=description,
+                    inline=False
+                )
+
+            if assignee and asana_assignee:
+                embed.add_field(
+                    name="👤 Default Assignee",
+                    value=f"{assignee.mention}",
+                    inline=True
+                )
+
+            if project:
+                embed.add_field(
+                    name="📁 Default Project",
+                    value=f"`{project}`",
+                    inline=True
+                )
+
+            if due_date_offset:
+                embed.add_field(
+                    name="📅 Due Date Offset",
+                    value=f"{due_date_offset} day{'s' if due_date_offset != 1 else ''}",
+                    inline=True
+                )
+
+            embed.add_field(
+                name="🚀 How to Use",
+                value=f"Use `/use-template template:\"{name}\"` to create tasks from this template",
+                inline=False
+            )
+
+            embed.set_footer(text=f"Created by {interaction.user.display_name}")
+
+            await interaction.followup.send(embed=embed)
+
+            # Log template creation
+            await error_logger.log_system_event(
+                "template_created",
+                f"Task template '{name}' created by {interaction.user.display_name}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "template_name": name},
+                "INFO"
+            )
+
+        else:
+            embed = discord.Embed(
+                title="❌ Template Creation Failed",
+                description="Failed to create the task template. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "create-template")
+
+        embed = discord.Embed(
+            title="❌ Template Creation Failed",
+            description=f"An error occurred while creating the template: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="list-templates", description="List available task templates")
+async def list_templates_command(interaction: discord.Interaction):
+    """List all available task templates for this server."""
+    await interaction.response.defer()
+
+    try:
+        templates = db_manager.get_task_templates(interaction.guild.id)
+
+        if not templates:
+            embed = discord.Embed(
+                title="📋 Task Templates",
+                description="No task templates have been created for this server yet.",
+                color=discord.Color.blue()
+            )
+
+            embed.add_field(
+                name="🚀 Create Your First Template",
+                value="Use `/create-template` to create reusable task configurations",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title="📋 Available Task Templates",
+            description=f"Found {len(templates)} template{'s' if len(templates) != 1 else ''} for this server",
+            color=discord.Color.blue()
+        )
+
+        for i, template in enumerate(templates[:10], 1):  # Limit to 10 templates in embed
+            template_info = f"**{template['name']}**"
+            if template['description']:
+                template_info += f"\n{template['description'][:100]}{'...' if len(template['description']) > 100 else ''}"
+
+            template_info += f"\n📝 `{template['task_name_template']}`"
+
+            if template['default_assignee']:
+                template_info += f"\n👤 Has default assignee"
+            if template['default_project']:
+                template_info += f"\n📁 Has default project"
+            if template['due_date_offset']:
+                template_info += f"\n📅 Due in {template['due_date_offset']} day{'s' if template['due_date_offset'] != 1 else ''}"
+            if template['usage_count'] > 0:
+                template_info += f"\n📊 Used {template['usage_count']} time{'s' if template['usage_count'] != 1 else ''}"
+
+            embed.add_field(
+                name=f"{i}. {template['name']}",
+                value=template_info,
+                inline=False
+            )
+
+        embed.add_field(
+            name="🚀 How to Use",
+            value="Use `/use-template template:\"Template Name\"` to create a task from any template",
+            inline=False
+        )
+
+        if len(templates) > 10:
+            embed.set_footer(text=f"Showing first 10 templates. Total: {len(templates)}")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "list-templates")
+
+        embed = discord.Embed(
+            title="❌ Failed to Load Templates",
+            description=f"Could not load task templates: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="use-template", description="Create a task using a saved template")
+@app_commands.describe(
+    template="Template name to use (use /list-templates to see available templates)",
+    custom_name="Custom task name (optional - overrides template default)",
+    assignee="Custom assignee (optional - overrides template default)",
+    project="Custom project ID (optional - overrides template default)",
+    due_date="Custom due date YYYY-MM-DD (optional - overrides template default)",
+    notes="Custom notes (optional - will be appended to template notes)"
+)
+async def use_template_command(
+    interaction: discord.Interaction,
+    template: str,
+    custom_name: Optional[str] = None,
+    assignee: Optional[discord.Member] = None,
+    project: Optional[str] = None,
+    due_date: Optional[str] = None,
+    notes: Optional[str] = None
+):
+    """Create a task using a saved template."""
+    await interaction.response.defer()
+
+    try:
+        # Find the template by name
+        templates = db_manager.get_task_templates(interaction.guild.id)
+        template_data = None
+
+        # Try exact match first, then case-insensitive match
+        for t in templates:
+            if t['name'].lower() == template.lower():
+                template_data = t
+                break
+
+        if not template_data:
+            embed = discord.Embed(
+                title="❌ Template Not Found",
+                description=f"No template found with name '{template}'.",
+                color=discord.Color.red()
+            )
+
+            # Suggest similar templates
+            similar = [t['name'] for t in templates if template.lower() in t['name'].lower()]
+            if similar:
+                embed.add_field(
+                    name="💡 Did you mean?",
+                    value="\n".join(f"• `{name}`" for name in similar[:3]),
+                    inline=False
+                )
+
+            embed.add_field(
+                name="📋 Available Templates",
+                value="Use `/list-templates` to see all available templates",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Start with template defaults
+        task_name = custom_name or template_data['task_name_template']
+        task_assignee = template_data['default_assignee']
+        task_project = project or template_data['default_project']
+        task_notes = template_data['default_notes'] or ""
+        task_due_date = due_date
+
+        # Apply customizations
+        if assignee:
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
+            if user_mapping:
+                task_assignee = user_mapping['asana_user_id']
+            else:
+                embed = discord.Embed(
+                    title="⚠️ User Not Mapped",
+                    description=f"{assignee.mention} is not mapped to an Asana user. Using template default assignee instead.",
+                    color=discord.Color.yellow()
+                )
+                await interaction.followup.send(embed=embed)
+
+        # Calculate due date from offset if no custom date provided
+        if not task_due_date and template_data['due_date_offset']:
+            task_due_date = (datetime.now() + timedelta(days=template_data['due_date_offset'])).strftime('%Y-%m-%d')
+
+        # Append custom notes
+        if notes:
+            if task_notes:
+                task_notes += "\n\n" + notes
+            else:
+                task_notes = notes
+
+        # Show what will be created
+        embed = discord.Embed(
+            title="📋 Task from Template",
+            description=f"Creating task using template **{template_data['name']}**",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="📝 Task Name",
+            value=task_name,
+            inline=False
+        )
+
+        if task_assignee:
+            # Try to find the Discord user for display
+            assignee_info = "Template default assignee"
+            for mapping in db_manager.list_user_mappings(interaction.guild.id):
+                if mapping['asana_user_id'] == task_assignee:
+                    discord_user = interaction.guild.get_member(mapping['discord_user_id'])
+                    if discord_user:
+                        assignee_info = f"{discord_user.mention}"
+                    break
+            embed.add_field(name="👤 Assignee", value=assignee_info, inline=True)
+
+        if task_project:
+            embed.add_field(name="📁 Project", value=f"`{task_project}`", inline=True)
+
+        if task_due_date:
+            embed.add_field(name="📅 Due Date", value=task_due_date, inline=True)
+
+        if task_notes:
+            embed.add_field(name="📋 Notes", value=task_notes[:500] + "..." if len(task_notes) > 500 else task_notes, inline=False)
+
+        embed.add_field(
+            name="✅ Confirm Creation?",
+            value="React with ✅ to create this task, or ❌ to cancel.",
+            inline=False
+        )
+
+        # Create confirmation view
+        view = TemplateTaskConfirmationView(template_data, task_name, task_assignee, task_project, task_due_date, task_notes, interaction)
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "use-template")
+
+        embed = discord.Embed(
+            title="❌ Template Usage Failed",
+            description=f"Failed to create task from template: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="delete-template", description="Delete a task template (Admin only)")
+@discord.app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    template="Name of the template to delete"
+)
+async def delete_template_command(interaction: discord.Interaction, template: str):
+    """Delete a task template."""
+    await interaction.response.defer()
+
+    try:
+        # Find the template by name
+        templates = db_manager.get_task_templates(interaction.guild.id, active_only=False)
+        template_data = None
+        template_id = None
+
+        for t in templates:
+            if t['name'].lower() == template.lower():
+                template_data = t
+                template_id = t['id']
+                break
+
+        if not template_data:
+            embed = discord.Embed(
+                title="❌ Template Not Found",
+                description=f"No template found with name '{template}'.",
+                color=discord.Color.red()
+            )
+
+            embed.add_field(
+                name="📋 Available Templates",
+                value="Use `/list-templates` to see all available templates",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Confirm deletion
+        embed = discord.Embed(
+            title="🗑️ Confirm Template Deletion",
+            description=f"Are you sure you want to delete the template **{template_data['name']}**?",
+            color=discord.Color.orange()
+        )
+
+        embed.add_field(
+            name="⚠️ This action cannot be undone",
+            value=f"This template has been used {template_data['usage_count']} time{'s' if template_data['usage_count'] != 1 else ''}.",
+            inline=False
+        )
+
+        view = TemplateDeletionView(template_id, template_data['name'], interaction)
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "delete-template")
+
+        embed = discord.Embed(
+            title="❌ Deletion Failed",
+            description=f"Failed to delete template: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@delete_template_command.error
+async def delete_template_error(interaction: discord.Interaction, error):
+    """Handle delete template command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to delete task templates.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Delete template error: {error}")
 
 @bot.tree.command(name="bulk-select", description="Select multiple tasks for batch operations (complete, update, etc.)")
 @app_commands.describe(
@@ -4131,6 +4585,216 @@ class ChatTaskConfirmationView(discord.ui.View):
         timeout_embed = discord.Embed(
             title="⏰ Confirmation Timed Out",
             description="The task confirmation has expired. Mention me again to try creating a task.",
+            color=discord.Color.yellow()
+        )
+
+        try:
+            await self.message.edit(embed=timeout_embed, view=self)
+        except:
+            pass  # Message might have been deleted
+
+# Template Task Confirmation View
+class TemplateTaskConfirmationView(discord.ui.View):
+    """View for confirming task creation from a template."""
+
+    def __init__(self, template_data, task_name, task_assignee, task_project, task_due_date, task_notes, interaction):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.template_data = template_data
+        self.task_name = task_name
+        self.task_assignee = task_assignee
+        self.task_project = task_project
+        self.task_due_date = task_due_date
+        self.task_notes = task_notes
+        self.interaction = interaction
+
+    @discord.ui.button(label="✅ Create Task", style=discord.ButtonStyle.green, emoji="✅")
+    async def confirm_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Confirm and create the task from template."""
+        try:
+            # Disable buttons
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            # Create the task
+            task = await asana_manager.create_task(
+                name=self.task_name,
+                project_id=self.task_project,
+                assignee=self.task_assignee,
+                due_date=self.task_due_date,
+                notes=self.task_notes,
+                guild_id=interaction.guild.id
+            )
+
+            # Update template usage count
+            db_manager.update_task_template_usage(self.template_data['id'])
+
+            # Success embed
+            success_embed = discord.Embed(
+                title="✅ Task Created from Template!",
+                description=f"**{task['name']}** has been created using template **{self.template_data['name']}**!",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            success_embed.add_field(name="📋 Task ID", value=f"`{task['gid']}`", inline=True)
+
+            if task.get('projects') and len(task['projects']) > 0:
+                project_names = [p['name'] for p in task['projects']]
+                success_embed.add_field(name="📁 Project", value=", ".join(project_names), inline=True)
+            else:
+                success_embed.add_field(name="📁 Project", value="Default project", inline=True)
+
+            if task.get('assignee'):
+                asana_assignee_name = task['assignee']['name']
+                assignee_display = asana_assignee_name
+                if self.task_assignee and "Auto-assigned" not in assignee_display:
+                    assignee_display += " (From template)"
+                success_embed.add_field(name="👤 Assignee", value=assignee_display, inline=True)
+
+            if task.get('due_on'):
+                success_embed.add_field(name="📅 Due Date", value=task['due_on'], inline=False)
+
+            if task.get('notes'):
+                notes = task['notes'][:200] + "..." if len(task['notes']) > 200 else task['notes']
+                success_embed.add_field(name="📝 Notes", value=notes, inline=False)
+
+            success_embed.set_footer(text=f"🤖 Created from template • Template used {self.template_data['usage_count'] + 1} time(s)")
+
+            await interaction.followup.send(embed=success_embed)
+
+            # Log successful template usage
+            await error_logger.log_system_event(
+                "template_used",
+                f"Task template '{self.template_data['name']}' used to create task {task['gid']}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "template_id": self.template_data['id'], "task_id": task['gid']},
+                "INFO"
+            )
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "confirm_template_task_creation")
+
+            error_embed = discord.Embed(
+                title="❌ Task Creation Failed",
+                description=f"Failed to create task from template: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red, emoji="❌")
+    async def cancel_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel task creation."""
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        cancel_embed = discord.Embed(
+            title="❌ Task Creation Cancelled",
+            description="The task creation has been cancelled.",
+            color=discord.Color.grey()
+        )
+        await interaction.followup.send(embed=cancel_embed)
+
+    async def on_timeout(self):
+        """Handle when the view times out."""
+        # Disable all components
+        for item in self.children:
+            item.disabled = True
+
+        timeout_embed = discord.Embed(
+            title="⏰ Confirmation Timed Out",
+            description="The task confirmation has expired. Use `/use-template` again to try creating a task.",
+            color=discord.Color.yellow()
+        )
+
+        try:
+            await self.message.edit(embed=timeout_embed, view=self)
+        except:
+            pass  # Message might have been deleted
+
+# Template Deletion Confirmation View
+class TemplateDeletionView(discord.ui.View):
+    """View for confirming template deletion."""
+
+    def __init__(self, template_id, template_name, interaction):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.template_id = template_id
+        self.template_name = template_name
+        self.interaction = interaction
+
+    @discord.ui.button(label="🗑️ Delete Template", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Confirm template deletion."""
+        try:
+            # Disable buttons
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            # Delete the template
+            success = db_manager.delete_task_template(self.template_id)
+
+            if success:
+                embed = discord.Embed(
+                    title="✅ Template Deleted",
+                    description=f"Template **{self.template_name}** has been permanently deleted.",
+                    color=discord.Color.green()
+                )
+
+                embed.set_footer(text="This action cannot be undone")
+
+                await interaction.followup.send(embed=embed)
+
+                # Log template deletion
+                await error_logger.log_system_event(
+                    "template_deleted",
+                    f"Task template '{self.template_name}' deleted by {interaction.user.display_name}",
+                    {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "template_name": self.template_name},
+                    "WARNING"
+                )
+            else:
+                embed = discord.Embed(
+                    title="❌ Deletion Failed",
+                    description="Failed to delete the template. It may have already been deleted.",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "confirm_template_deletion")
+
+            error_embed = discord.Embed(
+                title="❌ Deletion Failed",
+                description=f"An error occurred while deleting the template: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel template deletion."""
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        cancel_embed = discord.Embed(
+            title="❌ Deletion Cancelled",
+            description="The template deletion has been cancelled.",
+            color=discord.Color.grey()
+        )
+        await interaction.followup.send(embed=cancel_embed)
+
+    async def on_timeout(self):
+        """Handle when the view times out."""
+        # Disable all components
+        for item in self.children:
+            item.disabled = True
+
+        timeout_embed = discord.Embed(
+            title="⏰ Deletion Timed Out",
+            description="The template deletion confirmation has expired. The template was not deleted.",
             color=discord.Color.yellow()
         )
 

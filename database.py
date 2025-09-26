@@ -28,6 +28,7 @@ class Guild(Base):
     user_mappings = relationship("UserMapping", back_populates="guild", cascade="all, delete-orphan")
     notification_preferences = relationship("UserNotificationPreferences", back_populates="guild", cascade="all, delete-orphan")
     chat_channels = relationship("ChatChannel", back_populates="guild", cascade="all, delete-orphan")
+    task_templates = relationship("TaskTemplate", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -126,6 +127,31 @@ class ChatChannel(Base):
 
     # Relationships
     guild = relationship("Guild", back_populates="chat_channels")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class TaskTemplate(Base):
+    """Reusable task configuration templates."""
+    __tablename__ = 'task_templates'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    name = Column(String(255), nullable=False)  # Template name (e.g., "Bug Report")
+    description = Column(Text)  # Template description
+    task_name_template = Column(String(500), nullable=False)  # Template for task name with variables
+    default_assignee = Column(String(255))  # Default assignee Asana ID
+    default_project = Column(String(255))  # Default project ID
+    default_notes = Column(Text)  # Default task notes/description
+    due_date_offset = Column(Integer)  # Days from creation date (e.g., 7 for 1 week)
+    priority = Column(String(50))  # Template priority/ordering
+    is_active = Column(Boolean, default=True)  # Whether template is available for use
+    usage_count = Column(Integer, default=0)  # How many times template has been used
+    created_by = Column(BigInteger, nullable=False)  # Discord user who created it
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="task_templates")
 
     __table_args__ = {'sqlite_autoincrement': True}
 
@@ -432,6 +458,119 @@ class DatabaseManager:
                 return False
         except Exception as e:
             print(f"Error removing chat channel: {e}")
+            return False
+
+    def create_task_template(self, guild_id: int, name: str, task_name_template: str,
+                           description: str = None, default_assignee: str = None,
+                           default_project: str = None, default_notes: str = None,
+                           due_date_offset: int = None, priority: str = "normal",
+                           created_by: int = None) -> bool:
+        """Create a new task template."""
+        try:
+            with self.get_session() as session:
+                template = TaskTemplate(
+                    guild_id=guild_id,
+                    name=name,
+                    description=description,
+                    task_name_template=task_name_template,
+                    default_assignee=default_assignee,
+                    default_project=default_project,
+                    default_notes=default_notes,
+                    due_date_offset=due_date_offset,
+                    priority=priority,
+                    created_by=created_by
+                )
+                session.add(template)
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error creating task template: {e}")
+            return False
+
+    def get_task_templates(self, guild_id: int, active_only: bool = True) -> list:
+        """Get all task templates for a guild."""
+        try:
+            with self.get_session() as session:
+                query = session.query(TaskTemplate).filter(TaskTemplate.guild_id == guild_id)
+                if active_only:
+                    query = query.filter(TaskTemplate.is_active == True)
+                templates = query.order_by(TaskTemplate.priority, TaskTemplate.name).all()
+
+                return [{
+                    'id': t.id,
+                    'name': t.name,
+                    'description': t.description,
+                    'task_name_template': t.task_name_template,
+                    'default_assignee': t.default_assignee,
+                    'default_project': t.default_project,
+                    'default_notes': t.default_notes,
+                    'due_date_offset': t.due_date_offset,
+                    'priority': t.priority,
+                    'is_active': t.is_active,
+                    'usage_count': t.usage_count,
+                    'created_by': t.created_by,
+                    'created_at': t.created_at,
+                    'updated_at': t.updated_at
+                } for t in templates]
+        except Exception as e:
+            print(f"Error getting task templates: {e}")
+            return []
+
+    def get_task_template(self, template_id: int) -> Optional[Dict[str, Any]]:
+        """Get a specific task template by ID."""
+        try:
+            with self.get_session() as session:
+                template = session.query(TaskTemplate).filter(TaskTemplate.id == template_id).first()
+                if template:
+                    return {
+                        'id': template.id,
+                        'guild_id': template.guild_id,
+                        'name': template.name,
+                        'description': template.description,
+                        'task_name_template': template.task_name_template,
+                        'default_assignee': template.default_assignee,
+                        'default_project': template.default_project,
+                        'default_notes': template.default_notes,
+                        'due_date_offset': template.due_date_offset,
+                        'priority': template.priority,
+                        'is_active': template.is_active,
+                        'usage_count': template.usage_count,
+                        'created_by': template.created_by,
+                        'created_at': template.created_at,
+                        'updated_at': template.updated_at
+                    }
+                return None
+        except Exception as e:
+            print(f"Error getting task template: {e}")
+            return None
+
+    def update_task_template_usage(self, template_id: int) -> bool:
+        """Increment the usage count for a template."""
+        try:
+            with self.get_session() as session:
+                template = session.query(TaskTemplate).filter(TaskTemplate.id == template_id).first()
+                if template:
+                    template.usage_count += 1
+                    template.updated_at = datetime.utcnow()
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error updating template usage: {e}")
+            return False
+
+    def delete_task_template(self, template_id: int) -> bool:
+        """Delete a task template."""
+        try:
+            with self.get_session() as session:
+                template = session.query(TaskTemplate).filter(TaskTemplate.id == template_id).first()
+                if template:
+                    session.delete(template)
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error deleting task template: {e}")
             return False
 
 # Global database manager instance
