@@ -17,7 +17,9 @@ from flask import Flask, request, jsonify
 import threading
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import json
+import re
 from datetime import datetime, timedelta
+import httpx
 from config import bot_config
 from error_logger import init_error_logger
 from database import db_manager, ErrorLog
@@ -39,6 +41,7 @@ DISCORD_APPLICATION_ID = os.getenv('DISCORD_APPLICATION_ID')
 ASANA_ACCESS_TOKEN = os.getenv('ASANA_ACCESS_TOKEN')
 ASANA_WORKSPACE_ID = os.getenv('ASANA_WORKSPACE_ID')
 ASANA_DEFAULT_PROJECT_ID = os.getenv('ASANA_DEFAULT_PROJECT_ID')
+XAI_API_KEY = os.getenv('XAI_API_KEY')
 
 # Validate required environment variables
 required_vars = ['DISCORD_TOKEN', 'ASANA_ACCESS_TOKEN', 'ASANA_WORKSPACE_ID']
@@ -76,6 +79,25 @@ async def on_command_error(ctx, error):
     else:
         logger.error(f'Command error: {error}')
         await ctx.send(f"An error occurred: {str(error)}")
+
+@bot.event
+async def on_message(message):
+    """Handle messages in designated chat channels."""
+    # Ignore messages from bots (including ourselves)
+    if message.author.bot:
+        return
+
+    # Check if this is in a designated chat channel
+    chat_channel_config = db_manager.get_chat_channel(message.guild.id) if message.guild else None
+    if not chat_channel_config or message.channel.id != chat_channel_config['channel_id']:
+        return
+
+    # Check if the bot is mentioned
+    if bot.user not in message.mentions:
+        return
+
+    # Process the natural language task creation request
+    await handle_chat_channel_request(message)
 
 # Placeholder for Asana API functions (to be implemented)
 class AsanaManager:
@@ -585,16 +607,60 @@ class AuditManager:
             logger.error(f"Error checking missed deadlines: {e}")
 
     async def check_due_soon(self):
-        """Check for tasks due within 24 hours."""
+        """Check for tasks due soon and send personalized reminders."""
         try:
+            # Get all tasks with due dates
             tasks = await asana_manager.list_tasks()
-            tomorrow = datetime.now() + timedelta(days=1)
+            now = datetime.now()
+
+            # Check different reminder intervals
+            reminder_intervals = {
+                '1_hour': timedelta(hours=1),
+                '1_day': timedelta(days=1),
+                '1_week': timedelta(days=7)
+            }
+
+            # Group tasks by assignee for personalized notifications
+            tasks_by_assignee = {}
+
+            for task in tasks:
+                if task.get('due_on') and not task.get('completed'):
+                    due_date = datetime.fromisoformat(task['due_on'])
+
+                    # Skip if already past due
+                    if due_date <= now:
+                        continue
+
+                    assignee_id = task.get('assignee', {}).get('gid')
+                    if assignee_id:
+                        if assignee_id not in tasks_by_assignee:
+                            tasks_by_assignee[assignee_id] = []
+                        tasks_by_assignee[assignee_id].append(task)
+
+            # Send personalized reminders for each assignee
+            for asana_assignee_id, assignee_tasks in tasks_by_assignee.items():
+                for reminder_type, time_delta in reminder_intervals.items():
+                    reminder_threshold = now + time_delta
+
+                    # Find tasks that match this reminder interval
+                    matching_tasks = []
+                    for task in assignee_tasks:
+                        due_date = datetime.fromisoformat(task['due_on'])
+                        if due_date <= reminder_threshold:
+                            matching_tasks.append(task)
+
+                    # Send reminders for tasks in this interval
+                    for task in matching_tasks:
+                        await send_due_date_reminder(task, asana_assignee_id, reminder_type)
+
+            # Also send the general audit channel notification (legacy behavior)
+            tomorrow = now + timedelta(days=1)
             due_soon_tasks = []
 
             for task in tasks:
                 if task.get('due_on') and not task.get('completed'):
                     due_date = datetime.fromisoformat(task['due_on'])
-                    if due_date <= tomorrow and due_date > datetime.now():
+                    if due_date <= tomorrow and due_date > now:
                         due_soon_tasks.append(task)
 
             if due_soon_tasks:
@@ -750,6 +816,10 @@ async def process_task_event(event):
 
                 embed.set_footer(text=f"Task ID: {task['gid']}")
                 await audit_manager.send_audit_embed('updates', embed)
+
+                # Send assignment notification to the new assignee if enabled
+                if changes.get('new_value') and new_assignee != 'Unassigned':
+                    await send_assignment_notification(task, changes.get('new_value', {}).get('gid'))
 
             elif changes.get('field') in ['name', 'notes', 'due_on']:
                 # Other task updates
@@ -1471,6 +1541,16 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="🤖 AI-Powered Chat Channel",
+        value="""Designate a channel for natural language task creation
+• Mention @Botsana in the chat channel to create tasks
+• Use conversational language like "Create a task to fix the login bug due tomorrow"
+• Supports due dates, assignments, and project mentions
+• AI-powered parsing with confirmation""",
+        inline=False
+    )
+
+    embed.add_field(
         name="📝 Task Management",
         value="""`create-task` - Create a new task
 `update-task` - Update existing tasks
@@ -1478,6 +1558,36 @@ async def help_command(interaction: discord.Interaction):
 `view-task` - View task details
 `list-tasks` - List tasks from a project
 `delete-task` - Delete tasks""",
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ Bulk Operations",
+        value="""`bulk-select` - Select multiple tasks for batch operations
+• Complete multiple tasks at once
+• Reassign tasks to different users
+• Update due dates in bulk
+• Search and select from task lists""",
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ Configuration (Admin Only)",
+        value="""`set-chat-channel` - Designate a channel for AI chat
+`remove-chat-channel` - Disable AI chat channel
+`set-default-project` - Set default Asana project
+`set-audit-log` - Configure error logging channel
+`audit-setup` - Set up audit channels for monitoring""",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔔 Notifications",
+        value="""`notification-settings` - Manage your notification preferences
+• Customize due date reminders (1 hour, 1 day, 1 week)
+• Control assignment notifications
+• Receive personalized DM alerts
+• Opt-in/opt-out of different notification types""",
         inline=False
     )
 
@@ -2248,6 +2358,317 @@ async def list_mappings_error(interaction: discord.Interaction, error):
     else:
         logger.error(f"List mappings error: {error}")
 
+@bot.tree.command(name="set-chat-channel", description="Designate a channel for natural language task creation")
+@discord.app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    channel="The channel where the bot will respond to natural language task requests"
+)
+async def set_chat_channel_command(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    """Designate a channel for natural language task creation."""
+    await interaction.response.defer()
+
+    try:
+        # Validate that the bot can send messages to this channel
+        test_permissions = channel.permissions_for(interaction.guild.me)
+        if not test_permissions.send_messages or not test_permissions.embed_links:
+            embed = discord.Embed(
+                title="❌ Permission Denied",
+                description="I don't have permission to send messages and embeds in that channel. Please check my permissions.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Set the chat channel
+        success = db_manager.set_chat_channel(
+            guild_id=interaction.guild.id,
+            channel_id=channel.id,
+            channel_name=channel.name,
+            created_by=interaction.user.id
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Chat Channel Set",
+                description=f"Natural language task creation has been enabled in {channel.mention}",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="🎯 How It Works",
+                value="• Mention me (@Botsana) in that channel to create tasks\n• Use natural language like 'Create a task to fix the login bug due tomorrow'\n• I'll parse your request and ask for confirmation before creating tasks",
+                inline=False
+            )
+
+            embed.add_field(
+                name="📺 Channel",
+                value=channel.mention,
+                inline=True
+            )
+
+            embed.add_field(
+                name="👑 Set by",
+                value=interaction.user.mention,
+                inline=True
+            )
+
+            embed.set_footer(text="Use /remove-chat-channel to disable this feature")
+
+            await interaction.followup.send(embed=embed)
+
+            # Send a welcome message to the channel
+            welcome_embed = discord.Embed(
+                title="🤖 Botsana Chat Channel Activated!",
+                description="This channel is now designated for natural language task creation.",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+
+            welcome_embed.add_field(
+                name="💬 How to Use",
+                value="• Mention me (@Botsana) to create tasks\n• Example: `@Botsana Create a task to fix the login bug due tomorrow`\n• I'll parse your request and ask for confirmation",
+                inline=False
+            )
+
+            welcome_embed.set_footer(text="Set by " + str(interaction.user))
+
+            await channel.send(embed=welcome_embed)
+
+            # Log the configuration change
+            await error_logger.log_system_event(
+                "config_change",
+                f"Chat channel set to {channel.name} ({channel.id})",
+                {"guild_id": interaction.guild.id, "user_id": interaction.user.id, "channel_id": channel.id},
+                "INFO"
+            )
+
+        else:
+            embed = discord.Embed(
+                title="❌ Configuration Failed",
+                description="Failed to set the chat channel. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "set-chat-channel")
+
+        embed = discord.Embed(
+            title="❌ Configuration Failed",
+            description=f"Failed to set chat channel: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@set_chat_channel_command.error
+async def set_chat_channel_error(interaction: discord.Interaction, error):
+    """Handle set chat channel command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to set the chat channel.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Set chat channel error: {error}")
+
+@bot.tree.command(name="remove-chat-channel", description="Remove the designated chat channel")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def remove_chat_channel_command(interaction: discord.Interaction):
+    """Remove the designated chat channel."""
+    await interaction.response.defer()
+
+    try:
+        success = db_manager.remove_chat_channel(interaction.guild.id)
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Chat Channel Removed",
+                description="Natural language task creation has been disabled. The bot will no longer respond to mentions in the designated channel.",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed)
+        else:
+            embed = discord.Embed(
+                title="⚠️ No Chat Channel Set",
+                description="No chat channel was configured for this server.",
+                color=discord.Color.yellow()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "remove-chat-channel")
+
+        embed = discord.Embed(
+            title="❌ Removal Failed",
+            description=f"Failed to remove chat channel: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@remove_chat_channel_command.error
+async def remove_chat_channel_error(interaction: discord.Interaction, error):
+    """Handle remove chat channel command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to remove the chat channel.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Remove chat channel error: {error}")
+
+@bot.tree.command(name="bulk-select", description="Select multiple tasks for batch operations (complete, update, etc.)")
+@app_commands.describe(
+    search="Search term to find tasks (optional - shows recent tasks if empty)",
+    limit="Maximum number of tasks to show for selection (default 10, max 25)"
+)
+async def bulk_select_command(
+    interaction: discord.Interaction,
+    search: Optional[str] = None,
+    limit: Optional[int] = 10
+):
+    """Select multiple tasks for batch operations."""
+    await interaction.response.defer()
+
+    try:
+        if limit > 25:
+            limit = 25
+
+        # Find tasks based on search criteria
+        tasks = []
+        search_description = ""
+
+        if search:
+            # Search by name or assignee
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            assignee_id = user_mapping['asana_user_id'] if user_mapping else None
+
+            tasks = await asana_manager.search_tasks(search, assignee=assignee_id, limit=limit)
+            search_description = f"matching '{search}'"
+        else:
+            # Show recent tasks from default project or user's tasks
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            assignee_id = user_mapping['asana_user_id'] if user_mapping else None
+
+            tasks = await asana_manager.list_tasks(assignee=assignee_id)
+            tasks = [task for task in tasks if not task.get('completed', False)][:limit]  # Only incomplete tasks
+            search_description = "recent incomplete tasks"
+
+        if not tasks:
+            embed = discord.Embed(
+                title="❌ No Tasks Found",
+                description=f"No tasks found {search_description}.",
+                color=discord.Color.yellow()
+            )
+            if search:
+                embed.add_field(
+                    name="💡 Try:",
+                    value="• Use a broader search term\n• Check spelling\n• Remove filters to see recent tasks",
+                    inline=False
+                )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Create task selection interface
+        view = BulkTaskSelectionView(tasks, interaction)
+        view.message = await interaction.followup.send(
+            f"🎯 Found {len(tasks)} tasks {search_description}. Select the tasks you want to operate on:",
+            view=view
+        )
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "bulk-select")
+
+        error_embed = discord.Embed(
+            title="❌ Bulk Selection Failed",
+            description=f"Failed to search for tasks: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=error_embed)
+
+@bot.tree.command(name="notification-settings", description="Manage your notification preferences for task updates")
+async def notification_settings_command(interaction: discord.Interaction):
+    """Manage notification preferences for task updates."""
+    await interaction.response.defer()
+
+    try:
+        # Get current user preferences
+        user_prefs = db_manager.get_notification_preferences(interaction.user.id, interaction.guild.id)
+
+        embed = discord.Embed(
+            title="🔔 Notification Settings",
+            description="Configure when you want to be notified about task updates.",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="📅 Due Date Reminders",
+            value="Get notified when tasks are approaching their due dates.",
+            inline=False
+        )
+
+        # Due date reminder options
+        due_reminder_options = [
+            ("1_day", "1 day before due date", "⏰"),
+            ("1_hour", "1 hour before due date", "⏱️"),
+            ("1_week", "1 week before due date", "📅"),
+            ("disabled", "Disable due date reminders", "🚫")
+        ]
+
+        current_due_pref = user_prefs.get('due_date_reminder', '1_day') if user_prefs else '1_day'
+
+        embed.add_field(
+            name="Current Due Date Reminder",
+            value=f"**{next((opt[1] for opt in due_reminder_options if opt[0] == current_due_pref), '1 day before')}**",
+            inline=True
+        )
+
+        embed.add_field(
+            name="👥 Assignment Notifications",
+            value="Get notified when tasks are assigned to you.",
+            inline=False
+        )
+
+        # Assignment notification options
+        assignment_options = [
+            ("enabled", "Notify when assigned to tasks", "✅"),
+            ("disabled", "Disable assignment notifications", "🚫")
+        ]
+
+        current_assignment_pref = user_prefs.get('assignment_notifications', 'enabled') if user_prefs else 'enabled'
+
+        embed.add_field(
+            name="Current Assignment Notifications",
+            value=f"**{next((opt[1] for opt in assignment_options if opt[0] == current_assignment_pref), 'Enabled')}**",
+            inline=True
+        )
+
+        # Create settings view
+        view = NotificationSettingsView(user_prefs or {}, interaction)
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "notification-settings")
+
+        error_embed = discord.Embed(
+            title="❌ Failed to Load Settings",
+            description=f"Could not load your notification settings: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=error_embed)
+
 @bot.tree.command(name="status", description="Check Botsana's comprehensive system status")
 async def status_command(interaction: discord.Interaction):
     """Display comprehensive bot status and health information."""
@@ -2295,6 +2716,22 @@ async def status_command(interaction: discord.Interaction):
         embed.add_field(
             name="🗄️ Database",
             value=db_status,
+            inline=True
+        )
+
+        # AI System Status
+        ai_status = await get_ai_system_status()
+        embed.add_field(
+            name="🧠 AI System",
+            value=ai_status,
+            inline=True
+        )
+
+        # Chat Channel Status
+        chat_channel_status = await get_chat_channel_status(interaction.guild.id)
+        embed.add_field(
+            name="🤖 Chat Channel",
+            value=chat_channel_status,
             inline=True
         )
 
@@ -2370,6 +2807,39 @@ async def test_database_connection() -> str:
     except Exception as e:
         return f"❌ Connection Failed\n💬 {str(e)[:50]}..."
 
+async def get_ai_system_status() -> str:
+    """Get AI system status."""
+    try:
+        if XAI_API_KEY:
+            # Test AI connectivity
+            try:
+                test_response = await call_grok_api("Hello", "")
+                if test_response:
+                    return "✅ Active\n🤖 Grok-4-Fast-Reasoning"
+                else:
+                    return "⚠️ API Key Set\n🤖 Connection Failed"
+            except Exception:
+                return "⚠️ API Key Set\n🤖 Connection Failed"
+        else:
+            return "❌ Not configured\n💡 Set XAI_API_KEY"
+    except Exception as e:
+        return f"❌ Error: {str(e)[:30]}..."
+
+async def get_chat_channel_status(guild_id: int) -> str:
+    """Get chat channel status for the guild."""
+    try:
+        chat_channel_config = db_manager.get_chat_channel(guild_id)
+        if chat_channel_config:
+            chat_channel = bot.get_channel(chat_channel_config['channel_id'])
+            if chat_channel:
+                return f"✅ Active\n📺 {chat_channel.mention}"
+            else:
+                return "⚠️ Channel not found"
+        else:
+            return "❌ Not configured\n💡 Use `/set-chat-channel`"
+    except Exception as e:
+        return f"❌ Error: {str(e)[:30]}..."
+
 async def get_audit_system_status(guild_id: int) -> str:
     """Get audit system status for the guild."""
     try:
@@ -2424,6 +2894,1376 @@ def get_system_info() -> str:
         return f"🐍 Python {python_version}\n⚡ discord.py {discord.__version__}"
     except Exception:
         return "ℹ️ System info unavailable"
+
+# xAI/Grok API Integration
+async def call_grok_api(prompt: str, user_context: str = "") -> Optional[str]:
+    """Call Grok API for natural language processing."""
+    if not XAI_API_KEY:
+        logger.warning("XAI_API_KEY not configured, falling back to regex parsing")
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {XAI_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "grok-4-fast-reasoning",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are an expert at parsing natural language requests to create Asana tasks. Extract task information and return it in a specific JSON format. Be precise and only extract what's clearly stated."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"{user_context}\n\nParse this task request: {prompt}"
+                        }
+                    ],
+                    "temperature": 0.1,  # Low temperature for consistent parsing
+                    "max_tokens": 500
+                }
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                content = data['choices'][0]['message']['content']
+                logger.info(f"Grok API response: {content}")
+                return content
+            else:
+                logger.error(f"Grok API error: {response.status_code} - {response.text}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Error calling Grok API: {e}")
+        return None
+
+async def parse_task_with_grok(message: str, interaction: discord.Interaction) -> Optional[Dict[str, Any]]:
+    """Parse task using Grok AI instead of regex."""
+    try:
+        # Create context about available Discord users for assignment
+        user_context = "Available Discord users for assignment:"
+        if interaction.guild:
+            members = interaction.guild.members[:50]  # Limit to avoid token limits
+            for member in members:
+                user_context += f"\n- {member.display_name} (@{member.name}) - ID: {member.id}"
+
+        # Create detailed prompt for Grok
+        prompt = f"""
+Parse this natural language task request into structured Asana task data.
+
+Return ONLY a valid JSON object with this exact format:
+{{
+    "task_name": "string - the main task description/title",
+    "due_date": "YYYY-MM-DD format or null if no date mentioned",
+    "assignee_discord_id": "number - Discord user ID for assignment, or null",
+    "assignee_name": "string - Discord username if assigned, or null",
+    "project_name": "string - project name if mentioned, or null",
+    "notes": "string - additional notes/description, or null",
+    "confidence": "high|medium|low - how confident you are in this parsing"
+}}
+
+Rules:
+- task_name should be concise but descriptive
+- due_date should be in YYYY-MM-DD format, use today's date if "today", tomorrow for "tomorrow", etc.
+- assignee_discord_id should be the Discord user ID number from the available users list
+- If no assignee mentioned, set assignee fields to null
+- If no project mentioned, set project_name to null
+- If no notes/details beyond task name, set notes to null
+- Be conservative - only extract what's clearly stated
+
+Task request: "{message}"
+"""
+
+        ai_response = await call_grok_api(prompt, user_context)
+
+        if not ai_response:
+            return None
+
+        # Try to parse the JSON response
+        try:
+            # Clean up the response - sometimes AI adds extra text
+            json_start = ai_response.find('{')
+            json_end = ai_response.rfind('}') + 1
+            if json_start != -1 and json_end > json_start:
+                json_str = ai_response[json_start:json_end]
+                parsed_data = json.loads(json_str)
+            else:
+                logger.error(f"Could not find JSON in Grok response: {ai_response}")
+                return None
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Grok JSON response: {ai_response} - Error: {e}")
+            return None
+
+        # Validate the parsed data
+        if not parsed_data.get('task_name'):
+            logger.warning("Grok did not extract a task name")
+            return None
+
+        # Convert to our internal format
+        parsed_task = {
+            'name': parsed_data['task_name'],
+            'assignee': None,
+            'assignee_info': 'Auto-assigned to you',
+            'due_date': parsed_data.get('due_date'),
+            'notes': parsed_data.get('notes'),
+            'project_id': None,
+            'project_info': parsed_data.get('project_name', 'Default project') if parsed_data.get('project_name') else 'Default project',
+            'interpreted_as': message,
+            'confidence': parsed_data.get('confidence', 'medium')
+        }
+
+        # Handle assignee
+        if parsed_data.get('assignee_discord_id'):
+            discord_user_id = parsed_data['assignee_discord_id']
+            discord_user = interaction.guild.get_member(discord_user_id) if interaction.guild else None
+
+            if discord_user:
+                user_mapping = db_manager.get_user_mapping(interaction.guild.id, discord_user_id)
+                if user_mapping:
+                    parsed_task['assignee'] = user_mapping['asana_user_id']
+                    parsed_task['assignee_info'] = f"{discord_user.mention} → Asana user `{user_mapping['asana_user_name'] or user_mapping['asana_user_id']}`"
+                else:
+                    parsed_task['assignee_info'] = f"⚠️ {discord_user.mention} (not mapped to Asana user)"
+        else:
+            # Auto-assign to current user if they have a mapping
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            if user_mapping:
+                parsed_task['assignee'] = user_mapping['asana_user_id']
+                parsed_task['assignee_info'] = f"Auto-assigned to {interaction.user.mention} → Asana user `{user_mapping['asana_user_name'] or user_mapping['asana_user_id']}`"
+
+        logger.info(f"Successfully parsed task with Grok: {parsed_task['name']} (confidence: {parsed_task.get('confidence', 'unknown')})")
+        return parsed_task
+
+    except Exception as e:
+        logger.error(f"Error parsing task with Grok: {e}")
+        return None
+
+# Natural Language Processing Functions (Fallback to regex if AI fails)
+async def parse_natural_language_task(message: str, interaction: discord.Interaction) -> Optional[Dict[str, Any]]:
+    """Parse natural language task creation requests using AI first, then regex fallback."""
+    # Try AI parsing first
+    ai_parsed = await parse_task_with_grok(message, interaction)
+    if ai_parsed:
+        return ai_parsed
+
+    # Fall back to regex parsing if AI fails or isn't configured
+    logger.info("AI parsing failed or not configured, falling back to regex parsing")
+    return await parse_natural_language_task_regex(message, interaction)
+
+async def parse_natural_language_task_regex(message: str, interaction: discord.Interaction) -> Optional[Dict[str, Any]]:
+    """Parse natural language task creation requests using regex (fallback)."""
+    try:
+        message_lower = message.lower().strip()
+
+        # Initialize parsed task structure
+        parsed_task = {
+            'name': None,
+            'assignee': None,
+            'assignee_info': 'Auto-assigned to you',
+            'due_date': None,
+            'notes': None,
+            'project_id': None,
+            'project_info': 'Default project',
+            'interpreted_as': message
+        }
+
+        # Extract task name - look for common patterns
+        task_name_patterns = [
+            # "Create a task to [task description]"
+            r'create\s+a\s+task\s+to\s+(.+?)(?:\s+(?:for|by|due|assigned|assign)|\s*$)',
+            # "Add a task [task description]"
+            r'add\s+(?:a\s+)?task\s+(.+?)(?:\s+(?:for|by|due|assigned|assign)|\s*$)',
+            # "I need to [task description]"
+            r'i\s+need\s+to\s+(.+?)(?:\s+(?:by|due|tomorrow|today|next|\d+|\@)|\s*$)',
+            # "Schedule [task description]"
+            r'schedule\s+(.+?)(?:\s+(?:for|by|due|at)|\s*$)',
+            # "Remind me to [task description]"
+            r'remind\s+me\s+to\s+(.+?)(?:\s+(?:by|due|tomorrow|today|next|\d+|\@)|\s*$)',
+            # Simple task name in quotes
+            r'"([^"]+)"',
+            # Simple task name
+            r'^(.+?)(?:\s+(?:due|by|tomorrow|today|next|\d+|assigned|assign|@)|\s*$)'
+        ]
+
+        task_name = None
+        for pattern in task_name_patterns:
+            match = re.search(pattern, message_lower)
+            if match:
+                task_name = match.group(1).strip()
+                # Clean up the task name
+                task_name = re.sub(r'\s+', ' ', task_name)
+                break
+
+        if not task_name:
+            return None
+
+        parsed_task['name'] = task_name
+
+        # Extract due date
+        due_date = parse_due_date(message)
+        if due_date:
+            parsed_task['due_date'] = due_date.strftime('%Y-%m-%d')
+
+        # Extract assignee from Discord mentions
+        assignee_match = re.search(r'<@!?(\d+)>', message)
+        if assignee_match:
+            discord_user_id = int(assignee_match.group(1))
+            discord_user = interaction.guild.get_member(discord_user_id)
+
+            if discord_user:
+                user_mapping = db_manager.get_user_mapping(interaction.guild.id, discord_user_id)
+                if user_mapping:
+                    parsed_task['assignee'] = user_mapping['asana_user_id']
+                    parsed_task['assignee_info'] = f"{discord_user.mention} → Asana user `{user_mapping['asana_user_name'] or user_mapping['asana_user_id']}`"
+                else:
+                    parsed_task['assignee_info'] = f"⚠️ {discord_user.mention} (not mapped to Asana user)"
+        else:
+            # Auto-assign to current user if they have a mapping
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            if user_mapping:
+                parsed_task['assignee'] = user_mapping['asana_user_id']
+                parsed_task['assignee_info'] = f"Auto-assigned to {interaction.user.mention} → Asana user `{user_mapping['asana_user_name'] or user_mapping['asana_user_id']}`"
+
+        # Extract project if mentioned (basic implementation)
+        project_patterns = [
+            r'in\s+(?:the\s+)?(.+?)\s+project',
+            r'for\s+(?:the\s+)?(.+?)\s+project',
+            r'project\s+(.+?)(?:\s|$|due|by|assigned)'
+        ]
+
+        for pattern in project_patterns:
+            match = re.search(pattern, message_lower)
+            if match:
+                project_name = match.group(1).strip()
+                parsed_task['project_info'] = f"Project: {project_name}"
+                break
+
+        # Extract notes/description (anything after "with notes" or "description")
+        notes_patterns = [
+            r'(?:with\s+notes?|description|notes?)\s*[:\-]?\s*(.+)$',
+            r'(?:notes?|description)\s*[:\-]?\s*(.+)$'
+        ]
+
+        for pattern in notes_patterns:
+            match = re.search(pattern, message_lower)
+            if match:
+                parsed_task['notes'] = match.group(1).strip()
+                break
+
+        return parsed_task
+
+    except Exception as e:
+        logger.error(f"Error parsing natural language task: {e}")
+        return None
+
+def parse_due_date(message: str) -> Optional[datetime]:
+    """Parse due date from natural language."""
+    try:
+        message_lower = message.lower()
+        today = datetime.now().date()
+
+        # Tomorrow
+        if 'tomorrow' in message_lower:
+            return datetime.combine(today + timedelta(days=1), datetime.min.time())
+
+        # Today
+        if 'today' in message_lower:
+            return datetime.combine(today, datetime.min.time())
+
+        # Next week
+        if 'next week' in message_lower:
+            return datetime.combine(today + timedelta(days=7), datetime.min.time())
+
+        # Next month
+        if 'next month' in message_lower:
+            next_month = today.replace(day=1) + timedelta(days=32)
+            next_month = next_month.replace(day=1)
+            return datetime.combine(next_month, datetime.min.time())
+
+        # Day names
+        day_names = {
+            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+            'friday': 4, 'saturday': 5, 'sunday': 6
+        }
+
+        for day_name, day_num in day_names.items():
+            if f'next {day_name}' in message_lower or f'on {day_name}' in message_lower:
+                days_ahead = (day_num - today.weekday()) % 7
+                if days_ahead == 0:  # If it's today, get next week
+                    days_ahead = 7
+                target_date = today + timedelta(days=days_ahead)
+                return datetime.combine(target_date, datetime.min.time())
+
+            if day_name in message_lower and f'next {day_name}' not in message_lower:
+                days_ahead = (day_num - today.weekday()) % 7
+                if days_ahead == 0 and 'this' not in message_lower:  # If it's today and not explicitly "this", get next week
+                    days_ahead = 7
+                target_date = today + timedelta(days=days_ahead)
+                return datetime.combine(target_date, datetime.min.time())
+
+        # Specific date patterns (MM/DD, DD/MM, YYYY-MM-DD)
+        date_patterns = [
+            r'(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?',  # MM/DD/YYYY or DD/MM/YYYY
+            r'(\d{4})-(\d{1,2})-(\d{1,2})',          # YYYY-MM-DD
+        ]
+
+        for pattern in date_patterns:
+            match = re.search(pattern, message)
+            if match:
+                try:
+                    if len(match.groups()) == 3 and match.group(3):  # YYYY-MM-DD
+                        year = int(match.group(1))
+                        month = int(match.group(2))
+                        day = int(match.group(3))
+                    else:  # MM/DD or DD/MM - assume MM/DD for now
+                        month = int(match.group(1))
+                        day = int(match.group(2))
+                        year = today.year
+
+                        # If the date has passed this year, assume next year
+                        test_date = datetime(year, month, day).date()
+                        if test_date < today:
+                            year += 1
+
+                    return datetime.combine(datetime(year, month, day).date(), datetime.min.time())
+                except ValueError:
+                    continue  # Invalid date, try next pattern
+
+        # Relative days (in 3 days, 2 weeks, etc.)
+        relative_patterns = [
+            (r'in\s+(\d+)\s+days?', lambda m: today + timedelta(days=int(m.group(1)))),
+            (r'in\s+(\d+)\s+weeks?', lambda m: today + timedelta(weeks=int(m.group(1)))),
+            (r'in\s+(\d+)\s+months?', lambda m: today.replace(day=1) + timedelta(days=32 * int(m.group(1))).replace(day=1)),
+        ]
+
+        for pattern, date_func in relative_patterns:
+            match = re.search(pattern, message_lower)
+            if match:
+                target_date = date_func(match)
+                return datetime.combine(target_date, datetime.min.time())
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Error parsing due date: {e}")
+        return None
+
+# Task Confirmation View
+class TaskConfirmationView(discord.ui.View):
+    """View for confirming task creation from natural language."""
+
+    def __init__(self, parsed_task: Dict[str, Any], interaction: discord.Interaction):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.parsed_task = parsed_task
+        self.interaction = interaction
+
+    @discord.ui.button(label="✅ Create Task", style=discord.ButtonStyle.green, emoji="✅")
+    async def confirm_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Confirm and create the task."""
+        try:
+            # Disable buttons
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            # Create the task
+            task = await asana_manager.create_task(
+                name=self.parsed_task['name'],
+                project_id=self.parsed_task.get('project_id'),
+                assignee=self.parsed_task.get('assignee'),
+                due_date=self.parsed_task.get('due_date'),
+                notes=self.parsed_task.get('notes'),
+                guild_id=interaction.guild.id
+            )
+
+            # Success embed
+            success_embed = discord.Embed(
+                title="✅ Task Created Successfully!",
+                description=f"**{task['name']}** has been created using AI-powered natural language processing!",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            success_embed.add_field(name="📋 Task ID", value=f"`{task['gid']}`", inline=True)
+
+            if task.get('projects') and len(task['projects']) > 0:
+                project_names = [p['name'] for p in task['projects']]
+                success_embed.add_field(name="📁 Project", value=", ".join(project_names), inline=True)
+            else:
+                success_embed.add_field(name="📁 Project", value="Default project", inline=True)
+
+            if task.get('assignee'):
+                asana_assignee_name = task['assignee']['name']
+                assignee_display = asana_assignee_name
+                if self.parsed_task.get('assignee_info') and "Auto-assigned" in self.parsed_task['assignee_info']:
+                    assignee_display += " (Auto-assigned)"
+                success_embed.add_field(name="👤 Assignee", value=assignee_display, inline=True)
+            elif self.parsed_task.get('assignee_info'):
+                success_embed.add_field(name="👤 Assignee Info", value=self.parsed_task['assignee_info'], inline=False)
+
+            if task.get('due_on'):
+                success_embed.add_field(name="📅 Due Date", value=task['due_on'], inline=False)
+
+            if task.get('notes'):
+                notes = task['notes'][:200] + "..." if len(task['notes']) > 200 else task['notes']
+                success_embed.add_field(name="📝 Notes", value=notes, inline=False)
+
+            success_embed.set_footer(text="🤖 Created via Natural Language Processing • Use /chat-create for more AI-powered task creation!")
+
+            await interaction.followup.send(embed=success_embed)
+
+            # Log successful AI task creation
+            await error_logger.log_system_event(
+                "ai_task_created",
+                f"Natural language task creation successful: '{self.parsed_task['interpreted_as']}' -> Task {task['gid']}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "task_id": task['gid'], "parsed_task": self.parsed_task},
+                "INFO"
+            )
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "confirm_task_creation")
+
+            error_embed = discord.Embed(
+                title="❌ Task Creation Failed",
+                description=f"Failed to create the task: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red, emoji="❌")
+    async def cancel_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel task creation."""
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        cancel_embed = discord.Embed(
+            title="❌ Task Creation Cancelled",
+            description="The task creation has been cancelled. Use `/chat-create` to try again with different wording.",
+            color=discord.Color.grey()
+        )
+        await interaction.followup.send(embed=cancel_embed)
+
+    async def on_timeout(self):
+        """Handle when the view times out."""
+        # Disable all components
+        for item in self.children:
+            item.disabled = True
+
+        timeout_embed = discord.Embed(
+            title="⏰ Confirmation Timed Out",
+            description="The task confirmation has expired. Use `/chat-create` to try again.",
+            color=discord.Color.yellow()
+        )
+
+        try:
+            await self.message.edit(embed=timeout_embed, view=self)
+        except:
+            pass  # Message might have been deleted
+
+# Bulk Task Operations Views
+class BulkTaskSelectionView(discord.ui.View):
+    """View for selecting multiple tasks for bulk operations."""
+
+    def __init__(self, tasks: List[Dict[str, Any]], interaction: discord.Interaction):
+        super().__init__(timeout=600)  # 10 minute timeout
+        self.tasks = tasks
+        self.interaction = interaction
+        self.selected_tasks = set()
+
+        # Create select menu with tasks
+        options = []
+        for i, task in enumerate(tasks[:25], 1):  # Discord limit of 25 options
+            task_name = task.get('name', 'Unnamed Task')
+            task_id = task.get('gid', task.get('id', 'Unknown'))
+
+            # Truncate name if too long
+            if len(task_name) > 50:
+                task_name = task_name[:47] + "..."
+
+            assignee = task.get('assignee', {}).get('name', 'Unassigned')
+            due_date = task.get('due_on', 'No due date')
+
+            label = f"{i}. {task_name}"
+            description = f"👤 {assignee} | 📅 {due_date}"
+
+            if len(description) > 50:
+                description = description[:47] + "..."
+
+            options.append(discord.SelectOption(
+                label=label,
+                description=description,
+                value=task_id
+            ))
+
+        select_menu = BulkTaskSelect(self.tasks, self.selected_tasks)
+        self.add_item(select_menu)
+
+    @discord.ui.button(label="✅ Proceed with Selected", style=discord.ButtonStyle.green, disabled=True)
+    async def proceed_with_selected(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Proceed to bulk operations with selected tasks."""
+        if not self.selected_tasks:
+            await interaction.response.send_message("❌ Please select at least one task first.", ephemeral=True)
+            return
+
+        # Create bulk operations view
+        operations_view = BulkOperationsView(list(self.selected_tasks), self.tasks, interaction)
+
+        selected_count = len(self.selected_tasks)
+        embed = discord.Embed(
+            title=f"⚙️ Bulk Operations - {selected_count} Task{'s' if selected_count != 1 else ''} Selected",
+            description="Choose what operation you want to perform on the selected tasks:",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="📋 Selected Tasks",
+            value="\n".join([f"• {next((t['name'] for t in self.tasks if t.get('gid') == tid or t.get('id') == tid), 'Unknown Task')}" for tid in list(self.selected_tasks)[:5]]),
+            inline=False
+        )
+
+        if len(self.selected_tasks) > 5:
+            embed.set_footer(text=f"And {len(self.selected_tasks) - 5} more tasks...")
+
+        await interaction.response.edit_message(embed=embed, view=operations_view)
+
+    @discord.ui.button(label="🔄 Clear Selection", style=discord.ButtonStyle.secondary)
+    async def clear_selection(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Clear all selected tasks."""
+        self.selected_tasks.clear()
+        self.children[0].max_values = min(25, len(self.tasks))  # Reset select menu
+        self.children[1].disabled = True  # Disable proceed button
+
+        embed = discord.Embed(
+            title="🔄 Selection Cleared",
+            description="All tasks have been deselected. Choose the tasks you want to operate on:",
+            color=discord.Color.blue()
+        )
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+class BulkTaskSelect(discord.ui.Select):
+    """Select menu for choosing multiple tasks."""
+
+    def __init__(self, tasks: List[Dict[str, Any]], selected_tasks: set):
+        self.all_tasks = tasks
+        self.selected_tasks = selected_tasks
+
+        # Create options for the select menu
+        options = []
+        for i, task in enumerate(tasks[:25], 1):  # Discord limits to 25 options
+            task_name = task.get('name', 'Unnamed Task')
+            task_id = task.get('gid', task.get('id', 'Unknown'))
+
+            # Truncate name if too long
+            if len(task_name) > 50:
+                task_name = task_name[:47] + "..."
+
+            assignee = task.get('assignee', {}).get('name', 'Unassigned')
+            due_date = task.get('due_on', 'No due date')
+
+            label = f"{i}. {task_name}"
+            description = f"👤 {assignee} | 📅 {due_date}"
+
+            if len(description) > 50:
+                description = description[:47] + "..."
+
+            options.append(discord.SelectOption(
+                label=label,
+                description=description,
+                value=task_id
+            ))
+
+        super().__init__(
+            placeholder=f"Select tasks to operate on (0/{len(tasks)} selected)",
+            min_values=0,
+            max_values=min(25, len(tasks)),
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        """Handle task selection."""
+        # Update selected tasks
+        self.selected_tasks.clear()
+        self.selected_tasks.update(self.values)
+
+        # Update placeholder and button state
+        parent_view = self.view
+        selected_count = len(self.selected_tasks)
+
+        self.placeholder = f"Select tasks to operate on ({selected_count}/{len(self.all_tasks)} selected)"
+
+        # Enable/disable proceed button
+        proceed_button = next((item for item in parent_view.children if hasattr(item, 'label') and "Proceed" in item.label), None)
+        if proceed_button:
+            proceed_button.disabled = selected_count == 0
+
+        await interaction.response.edit_message(view=parent_view)
+
+class BulkOperationsView(discord.ui.View):
+    """View for choosing bulk operations to perform."""
+
+    def __init__(self, selected_task_ids: List[str], all_tasks: List[Dict[str, Any]], interaction: discord.Interaction):
+        super().__init__(timeout=600)  # 10 minute timeout
+        self.selected_task_ids = selected_task_ids
+        self.all_tasks = all_tasks
+        self.interaction = interaction
+
+    @discord.ui.button(label="✅ Complete All", style=discord.ButtonStyle.green, emoji="✅")
+    async def complete_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Mark all selected tasks as completed."""
+        await interaction.response.defer()
+
+        try:
+            completed_count = 0
+            failed_tasks = []
+
+            for task_id in self.selected_task_ids:
+                try:
+                    await asana_manager.complete_task(task_id)
+                    completed_count += 1
+                except Exception as e:
+                    task_name = next((t['name'] for t in self.all_tasks if t.get('gid') == task_id or t.get('id') == task_id), 'Unknown Task')
+                    failed_tasks.append(f"{task_name}: {str(e)}")
+
+            # Create results embed
+            embed = discord.Embed(
+                title="✅ Bulk Completion Results",
+                description=f"Successfully completed {completed_count} out of {len(self.selected_task_ids)} tasks.",
+                color=discord.Color.green() if completed_count > 0 else discord.Color.red(),
+                timestamp=datetime.now()
+            )
+
+            if failed_tasks:
+                embed.add_field(
+                    name="❌ Failed Tasks",
+                    value="\n".join(failed_tasks[:5]),  # Limit to 5 failures
+                    inline=False
+                )
+
+            embed.set_footer(text="Tasks completed via bulk operations")
+
+            await interaction.followup.send(embed=embed)
+
+            # Log bulk operation
+            await error_logger.log_system_event(
+                "bulk_operation",
+                f"Bulk completion: {completed_count}/{len(self.selected_task_ids)} tasks completed",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "operation": "complete", "success_count": completed_count, "total_count": len(self.selected_task_ids)},
+                "INFO"
+            )
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "bulk_complete")
+
+            error_embed = discord.Embed(
+                title="❌ Bulk Completion Failed",
+                description=f"Failed to complete tasks: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+    @discord.ui.button(label="👤 Reassign All", style=discord.ButtonStyle.primary, emoji="👤")
+    async def reassign_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Reassign all selected tasks to a new user."""
+        # Create reassignment modal
+        modal = BulkReassignmentModal(self.selected_task_ids, self.all_tasks)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="📅 Update Due Dates", style=discord.ButtonStyle.primary, emoji="📅")
+    async def update_due_dates(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Update due dates for all selected tasks."""
+        # Create due date update modal
+        modal = BulkDueDateModal(self.selected_task_ids, self.all_tasks)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red, emoji="❌")
+    async def cancel_operation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel the bulk operation."""
+        cancel_embed = discord.Embed(
+            title="❌ Bulk Operation Cancelled",
+            description="The bulk operation has been cancelled.",
+            color=discord.Color.grey()
+        )
+        await interaction.response.edit_message(embed=cancel_embed, view=None)
+
+class BulkReassignmentModal(discord.ui.Modal, title="Bulk Reassign Tasks"):
+    """Modal for bulk reassignment of tasks."""
+
+    assignee = discord.ui.TextInput(
+        label="New Assignee (Discord @mention or Asana ID)",
+        placeholder="@username or Asana User ID",
+        required=True,
+        max_length=100
+    )
+
+    def __init__(self, selected_task_ids: List[str], all_tasks: List[Dict[str, Any]]):
+        super().__init__()
+        self.selected_task_ids = selected_task_ids
+        self.all_tasks = all_tasks
+
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle bulk reassignment submission."""
+        await interaction.response.defer()
+
+        try:
+            # Parse assignee
+            assignee_input = str(self.assignee).strip()
+            asana_assignee = None
+
+            # Check if it's a Discord mention
+            mention_match = re.search(r'<@!?(\d+)>', assignee_input)
+            if mention_match:
+                discord_user_id = int(mention_match.group(1))
+                discord_user = interaction.guild.get_member(discord_user_id)
+
+                if discord_user:
+                    user_mapping = db_manager.get_user_mapping(interaction.guild.id, discord_user_id)
+                    if user_mapping:
+                        asana_assignee = user_mapping['asana_user_id']
+                        assignee_display = f"{discord_user.mention} → Asana user `{user_mapping['asana_user_name']}`"
+                    else:
+                        error_embed = discord.Embed(
+                            title="❌ User Not Mapped",
+                            description=f"{discord_user.mention} is not mapped to an Asana user. Use `/map-user` first.",
+                            color=discord.Color.red()
+                        )
+                        await interaction.followup.send(embed=error_embed)
+                        return
+                else:
+                    error_embed = discord.Embed(
+                        title="❌ User Not Found",
+                        description="The mentioned user was not found in this server.",
+                        color=discord.Color.red()
+                    )
+                    await interaction.followup.send(embed=error_embed)
+                    return
+            else:
+                # Assume it's an Asana user ID
+                asana_assignee = assignee_input
+                assignee_display = f"Asana user ID: `{asana_assignee}`"
+
+            # Perform bulk reassignment
+            reassigned_count = 0
+            failed_tasks = []
+
+            for task_id in self.selected_task_ids:
+                try:
+                    await asana_manager.update_task(task_id=task_id, assignee=asana_assignee)
+                    reassigned_count += 1
+                except Exception as e:
+                    task_name = next((t['name'] for t in self.all_tasks if t.get('gid') == task_id or t.get('id') == task_id), 'Unknown Task')
+                    failed_tasks.append(f"{task_name}: {str(e)}")
+
+            # Create results embed
+            embed = discord.Embed(
+                title="👤 Bulk Reassignment Results",
+                description=f"Successfully reassigned {reassigned_count} out of {len(self.selected_task_ids)} tasks to {assignee_display}.",
+                color=discord.Color.green() if reassigned_count > 0 else discord.Color.red(),
+                timestamp=datetime.now()
+            )
+
+            if failed_tasks:
+                embed.add_field(
+                    name="❌ Failed Tasks",
+                    value="\n".join(failed_tasks[:3]),  # Limit to 3 failures
+                    inline=False
+                )
+
+            embed.set_footer(text="Tasks reassigned via bulk operations")
+
+            await interaction.followup.send(embed=embed)
+
+            # Log bulk operation
+            await error_logger.log_system_event(
+                "bulk_operation",
+                f"Bulk reassignment: {reassigned_count}/{len(self.selected_task_ids)} tasks reassigned",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "operation": "reassign", "assignee": assignee_display, "success_count": reassigned_count},
+                "INFO"
+            )
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "bulk_reassign")
+
+            error_embed = discord.Embed(
+                title="❌ Bulk Reassignment Failed",
+                description=f"Failed to reassign tasks: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+class BulkDueDateModal(discord.ui.Modal, title="Bulk Update Due Dates"):
+    """Modal for bulk due date updates."""
+
+    due_date = discord.ui.TextInput(
+        label="New Due Date (YYYY-MM-DD format)",
+        placeholder="2025-12-31",
+        required=True,
+        max_length=10
+    )
+
+    def __init__(self, selected_task_ids: List[str], all_tasks: List[Dict[str, Any]]):
+        super().__init__()
+        self.selected_task_ids = selected_task_ids
+        self.all_tasks = all_tasks
+
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle bulk due date update submission."""
+        await interaction.response.defer()
+
+        try:
+            due_date_str = str(self.due_date).strip()
+
+            # Validate date format
+            try:
+                datetime.strptime(due_date_str, '%Y-%m-%d')
+            except ValueError:
+                error_embed = discord.Embed(
+                    title="❌ Invalid Date Format",
+                    description="Please use YYYY-MM-DD format (e.g., 2025-12-31).",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=error_embed)
+                return
+
+            # Perform bulk due date update
+            updated_count = 0
+            failed_tasks = []
+
+            for task_id in self.selected_task_ids:
+                try:
+                    await asana_manager.update_task(task_id=task_id, due_date=due_date_str)
+                    updated_count += 1
+                except Exception as e:
+                    task_name = next((t['name'] for t in self.all_tasks if t.get('gid') == task_id or t.get('id') == task_id), 'Unknown Task')
+                    failed_tasks.append(f"{task_name}: {str(e)}")
+
+            # Create results embed
+            embed = discord.Embed(
+                title="📅 Bulk Due Date Update Results",
+                description=f"Successfully updated due dates for {updated_count} out of {len(self.selected_task_ids)} tasks to **{due_date_str}**.",
+                color=discord.Color.green() if updated_count > 0 else discord.Color.red(),
+                timestamp=datetime.now()
+            )
+
+            if failed_tasks:
+                embed.add_field(
+                    name="❌ Failed Tasks",
+                    value="\n".join(failed_tasks[:3]),  # Limit to 3 failures
+                    inline=False
+                )
+
+            embed.set_footer(text="Due dates updated via bulk operations")
+
+            await interaction.followup.send(embed=embed)
+
+            # Log bulk operation
+            await error_logger.log_system_event(
+                "bulk_operation",
+                f"Bulk due date update: {updated_count}/{len(self.selected_task_ids)} tasks updated to {due_date_str}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "operation": "update_due_date", "due_date": due_date_str, "success_count": updated_count},
+                "INFO"
+            )
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "bulk_update_due_date")
+
+            error_embed = discord.Embed(
+                title="❌ Bulk Due Date Update Failed",
+                description=f"Failed to update due dates: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+# Enhanced Notification Functions
+async def send_assignment_notification(task: Dict[str, Any], asana_assignee_id: str):
+    """Send assignment notification to Discord user if they have notifications enabled."""
+    try:
+        # Find Discord user mapping for this Asana user
+        user_mapping = db_manager.get_user_mapping_by_asana_id(asana_assignee_id)
+        if not user_mapping:
+            return  # No Discord user mapped to this Asana user
+
+        # Check notification preferences
+        prefs = db_manager.get_notification_preferences(user_mapping['discord_user_id'], user_mapping['guild_id'])
+        if not prefs or prefs.get('assignment_notifications') == 'disabled':
+            return  # User has disabled assignment notifications
+
+        # Get Discord user and guild
+        guild = bot.get_guild(user_mapping['guild_id'])
+        if not guild:
+            return
+
+        discord_user = guild.get_member(user_mapping['discord_user_id'])
+        if not discord_user:
+            return
+
+        # Create notification embed
+        embed = discord.Embed(
+            title="📋 Task Assigned to You",
+            description=f"You have been assigned to **{task['name']}**",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        embed.add_field(name="📝 Task", value=task['name'], inline=False)
+
+        if task.get('due_on'):
+            embed.add_field(name="📅 Due Date", value=task['due_on'], inline=True)
+
+        if task.get('notes'):
+            notes = task['notes'][:200] + "..." if len(task['notes']) > 200 else task['notes']
+            embed.add_field(name="📋 Notes", value=notes, inline=False)
+
+        embed.add_field(name="🔗 View Task", value=f"Use `/view-task task_id:{task['gid']}` to see full details", inline=False)
+
+        embed.set_footer(text=f"Task ID: {task['gid']} • Use /notification-settings to change preferences")
+
+        # Try to send DM to user
+        try:
+            await discord_user.send(embed=embed)
+        except discord.Forbidden:
+            # If DM fails, we could send to a notification channel, but for now we'll just skip
+            pass
+
+    except Exception as e:
+        logger.error(f"Error sending assignment notification: {e}")
+
+async def send_due_date_reminder(task: Dict[str, Any], asana_assignee_id: str, reminder_type: str):
+    """Send due date reminder based on user preferences."""
+    try:
+        # Find Discord user mapping for this Asana user
+        user_mapping = db_manager.get_user_mapping_by_asana_id(asana_assignee_id)
+        if not user_mapping:
+            return
+
+        # Check notification preferences
+        prefs = db_manager.get_notification_preferences(user_mapping['discord_user_id'], user_mapping['guild_id'])
+        if not prefs or prefs.get('due_date_reminder') == 'disabled':
+            return
+
+        # Check if this reminder type matches user preference
+        if prefs.get('due_date_reminder') != reminder_type:
+            return
+
+        # Get Discord user and guild
+        guild = bot.get_guild(user_mapping['guild_id'])
+        if not guild:
+            return
+
+        discord_user = guild.get_member(user_mapping['discord_user_id'])
+        if not discord_user:
+            return
+
+        # Create reminder embed
+        reminder_messages = {
+            '1_hour': ('⏱️ Task Due in 1 Hour', 'This task is due within the next hour!'),
+            '1_day': ('⏰ Task Due Tomorrow', 'This task is due within the next 24 hours.'),
+            '1_week': ('📅 Task Due in 1 Week', 'This task is due within the next 7 days.')
+        }
+
+        title, description = reminder_messages.get(reminder_type, ('📅 Task Due Soon', 'This task is approaching its due date.'))
+
+        embed = discord.Embed(
+            title=title,
+            description=f"{description}\n\n**{task['name']}**",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+
+        embed.add_field(name="📅 Due Date", value=task['due_on'], inline=True)
+        embed.add_field(name="⏰ Time Remaining", value=get_time_until_due(task['due_on']), inline=True)
+        embed.add_field(name="🔗 View Task", value=f"Use `/view-task task_id:{task['gid']}` to see details", inline=False)
+
+        embed.set_footer(text=f"Task ID: {task['gid']} • Use /notification-settings to adjust reminders")
+
+        # Try to send DM to user
+        try:
+            await discord_user.send(embed=embed)
+        except discord.Forbidden:
+            pass
+
+    except Exception as e:
+        logger.error(f"Error sending due date reminder: {e}")
+
+def get_time_until_due(due_date_str: str) -> str:
+    """Get human-readable time until due date."""
+    try:
+        due_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
+        now = datetime.now(due_date.tzinfo) if due_date.tzinfo else datetime.now()
+
+        if due_date <= now:
+            return "Overdue!"
+
+        delta = due_date - now
+
+        if delta.days > 0:
+            return f"{delta.days} day{'s' if delta.days != 1 else ''}"
+
+        hours = delta.seconds // 3600
+        if hours > 0:
+            return f"{hours} hour{'s' if hours != 1 else ''}"
+
+        minutes = delta.seconds // 60
+        if minutes > 0:
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+        return "Less than 1 minute"
+
+    except Exception:
+        return "Unknown"
+
+# Chat Channel Message Handling
+async def handle_chat_channel_request(message):
+    """Handle natural language task creation requests in designated chat channels."""
+    try:
+        # Extract the message content, removing the bot mention
+        content = message.content
+
+        # Remove the bot mention from the content
+        # This handles both <@123456789> and <@!123456789> formats
+        content = re.sub(r'<@!?' + str(bot.user.id) + r'>', '', content).strip()
+
+        # If the message is empty after removing the mention, provide help
+        if not content:
+            embed = discord.Embed(
+                title="🤖 How to Create Tasks",
+                description="I can help you create Asana tasks using natural language!",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="💬 Examples",
+                value="• `Create a task to fix the login bug due tomorrow`\n• `Add a new task called review code assigned to @developer`\n• `Schedule a meeting with the team for Friday`\n• `Remind me to update documentation next week`",
+                inline=False
+            )
+            embed.add_field(
+                name="📝 What I Understand",
+                value="• Task names and descriptions\n• Due dates (tomorrow, next week, specific dates)\n• @mentions for assignment\n• Project references",
+                inline=False
+            )
+            await message.reply(embed=embed)
+            return
+
+        # Create a mock interaction object for compatibility with existing parsing functions
+        class MockInteraction:
+            def __init__(self, message):
+                self.guild = message.guild
+                self.user = message.author
+                self.message = message
+
+        mock_interaction = MockInteraction(message)
+
+        # Parse the natural language message
+        parsed_task = await parse_natural_language_task(content, mock_interaction)
+
+        if not parsed_task:
+            embed = discord.Embed(
+                title="❓ Couldn't Understand Request",
+                description="I couldn't parse your task request. Try rephrasing it!",
+                color=discord.Color.orange()
+            )
+            embed.add_field(
+                name="💡 Examples of what I understand:",
+                value="• 'Create a task to fix the login bug due tomorrow'\n• 'Add a new task called review code assigned to @developer'\n• 'Schedule a meeting with the team for Friday'\n• 'Remind me to update documentation next week'",
+                inline=False
+            )
+            embed.add_field(
+                name="🔧 Alternative",
+                value="You can also use `/create-task` with specific parameters if natural language doesn't work.",
+                inline=False
+            )
+            await message.reply(embed=embed)
+            return
+
+        # Show what was parsed with confirmation buttons
+        confirmation_embed = discord.Embed(
+            title="🤖 Task Parsed from Your Message",
+            description=f"I interpreted your request as: **{parsed_task['interpreted_as']}**",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        confirmation_embed.add_field(
+            name="📋 Task Details",
+            value=f"**Name:** {parsed_task['name']}\n"
+                  f"**Assignee:** {parsed_task.get('assignee_info', 'Auto-assigned to you')}\n"
+                  f"**Due Date:** {parsed_task.get('due_date', 'No due date')}\n"
+                  f"**Project:** {parsed_task.get('project_info', 'Default project')}",
+            inline=False
+        )
+
+        confirmation_embed.add_field(
+            name="✅ Confirm Creation?",
+            value="React with ✅ to create this task, or ❌ to cancel.",
+            inline=False
+        )
+
+        # Create confirmation view
+        view = ChatTaskConfirmationView(parsed_task, message)
+        await message.reply(embed=confirmation_embed, view=view)
+
+        # Log the AI interpretation
+        await error_logger.log_system_event(
+            "ai_interpretation",
+            f"Chat channel task creation: '{content}' -> '{parsed_task['interpreted_as']}'",
+            {"user_id": message.author.id, "guild_id": message.guild.id, "channel_id": message.channel.id, "parsed_task": parsed_task},
+            "INFO"
+        )
+
+    except Exception as e:
+        logger.error(f"Error handling chat channel request: {e}")
+
+        embed = discord.Embed(
+            title="❌ Processing Failed",
+            description=f"I encountered an error while processing your request: {str(e)}",
+            color=discord.Color.red()
+        )
+        await message.reply(embed=embed)
+
+# Chat Channel Task Confirmation View
+class ChatTaskConfirmationView(discord.ui.View):
+    """View for confirming task creation from chat channel messages."""
+
+    def __init__(self, parsed_task: Dict[str, Any], message: discord.Message):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.parsed_task = parsed_task
+        self.message = message
+
+    @discord.ui.button(label="✅ Create Task", style=discord.ButtonStyle.green, emoji="✅")
+    async def confirm_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Confirm and create the task."""
+        try:
+            # Disable buttons
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            # Create the task
+            task = await asana_manager.create_task(
+                name=self.parsed_task['name'],
+                project_id=self.parsed_task.get('project_id'),
+                assignee=self.parsed_task.get('assignee'),
+                due_date=self.parsed_task.get('due_date'),
+                notes=self.parsed_task.get('notes'),
+                guild_id=interaction.guild.id
+            )
+
+            # Success embed
+            success_embed = discord.Embed(
+                title="✅ Task Created Successfully!",
+                description=f"**{task['name']}** has been created using AI-powered natural language processing!",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            success_embed.add_field(name="📋 Task ID", value=f"`{task['gid']}`", inline=True)
+
+            if task.get('projects') and len(task['projects']) > 0:
+                project_names = [p['name'] for p in task['projects']]
+                success_embed.add_field(name="📁 Project", value=", ".join(project_names), inline=True)
+            else:
+                success_embed.add_field(name="📁 Project", value="Default project", inline=True)
+
+            if task.get('assignee'):
+                asana_assignee_name = task['assignee']['name']
+                assignee_display = asana_assignee_name
+                if self.parsed_task.get('assignee_info') and "Auto-assigned" in self.parsed_task['assignee_info']:
+                    assignee_display += " (Auto-assigned)"
+                success_embed.add_field(name="👤 Assignee", value=assignee_display, inline=True)
+            elif self.parsed_task.get('assignee_info'):
+                success_embed.add_field(name="👤 Assignee Info", value=self.parsed_task['assignee_info'], inline=False)
+
+            if task.get('due_on'):
+                success_embed.add_field(name="📅 Due Date", value=task['due_on'], inline=False)
+
+            if task.get('notes'):
+                notes = task['notes'][:200] + "..." if len(task['notes']) > 200 else task['notes']
+                success_embed.add_field(name="📝 Notes", value=notes, inline=False)
+
+            success_embed.set_footer(text="🤖 Created via Chat Channel • Use @Botsana for more natural language task creation!")
+
+            await interaction.followup.send(embed=success_embed)
+
+            # Log successful AI task creation
+            await error_logger.log_system_event(
+                "ai_task_created",
+                f"Chat channel task creation successful: '{self.parsed_task['interpreted_as']}' -> Task {task['gid']}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "task_id": task['gid'], "parsed_task": self.parsed_task},
+                "INFO"
+            )
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "confirm_chat_task_creation")
+
+            error_embed = discord.Embed(
+                title="❌ Task Creation Failed",
+                description=f"Failed to create the task: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red, emoji="❌")
+    async def cancel_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel task creation."""
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        cancel_embed = discord.Embed(
+            title="❌ Task Creation Cancelled",
+            description="The task creation has been cancelled.",
+            color=discord.Color.grey()
+        )
+        await interaction.followup.send(embed=cancel_embed)
+
+    async def on_timeout(self):
+        """Handle when the view times out."""
+        # Disable all components
+        for item in self.children:
+            item.disabled = True
+
+        timeout_embed = discord.Embed(
+            title="⏰ Confirmation Timed Out",
+            description="The task confirmation has expired. Mention me again to try creating a task.",
+            color=discord.Color.yellow()
+        )
+
+        try:
+            await self.message.edit(embed=timeout_embed, view=self)
+        except:
+            pass  # Message might have been deleted
+
+# Notification Settings View
+class NotificationSettingsView(discord.ui.View):
+    """View for managing notification preferences."""
+
+    def __init__(self, current_prefs: Dict[str, Any], interaction: discord.Interaction):
+        super().__init__(timeout=600)  # 10 minute timeout
+        self.current_prefs = current_prefs
+        self.interaction = interaction
+
+    @discord.ui.select(
+        placeholder="Choose due date reminder timing...",
+        options=[
+            discord.SelectOption(label="1 day before due date", value="1_day", emoji="⏰", description="Get reminded 24 hours before tasks are due"),
+            discord.SelectOption(label="1 hour before due date", value="1_hour", emoji="⏱️", description="Get reminded 1 hour before tasks are due"),
+            discord.SelectOption(label="1 week before due date", value="1_week", emoji="📅", description="Get reminded 7 days before tasks are due"),
+            discord.SelectOption(label="Disable due date reminders", value="disabled", emoji="🚫", description="Turn off due date reminders")
+        ]
+    )
+    async def due_date_reminder_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        """Handle due date reminder preference selection."""
+        selected_value = select.values[0]
+
+        # Update preferences
+        success = db_manager.set_notification_preferences(
+            discord_user_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            due_date_reminder=selected_value,
+            assignment_notifications=self.current_prefs.get('assignment_notifications', 'enabled')
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Due Date Reminder Updated",
+                description=f"Your due date reminder preference has been set to: **{select.selected_options[0].label}**",
+                color=discord.Color.green()
+            )
+
+            # Update current prefs
+            self.current_prefs['due_date_reminder'] = selected_value
+
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            error_embed = discord.Embed(
+                title="❌ Update Failed",
+                description="Failed to update your due date reminder preference. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+
+    @discord.ui.select(
+        placeholder="Choose assignment notification setting...",
+        options=[
+            discord.SelectOption(label="Notify when assigned to tasks", value="enabled", emoji="✅", description="Get notified when tasks are assigned to you"),
+            discord.SelectOption(label="Disable assignment notifications", value="disabled", emoji="🚫", description="Turn off assignment notifications")
+        ]
+    )
+    async def assignment_notification_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        """Handle assignment notification preference selection."""
+        selected_value = select.values[0]
+
+        # Update preferences
+        success = db_manager.set_notification_preferences(
+            discord_user_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            due_date_reminder=self.current_prefs.get('due_date_reminder', '1_day'),
+            assignment_notifications=selected_value
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Assignment Notification Updated",
+                description=f"Your assignment notification preference has been set to: **{select.selected_options[0].label}**",
+                color=discord.Color.green()
+            )
+
+            # Update current prefs
+            self.current_prefs['assignment_notifications'] = selected_value
+
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            error_embed = discord.Embed(
+                title="❌ Update Failed",
+                description="Failed to update your assignment notification preference. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+
+    @discord.ui.button(label="🔄 Reset to Defaults", style=discord.ButtonStyle.secondary)
+    async def reset_to_defaults(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Reset preferences to defaults."""
+        success = db_manager.set_notification_preferences(
+            discord_user_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            due_date_reminder='1_day',
+            assignment_notifications='enabled'
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="🔄 Preferences Reset",
+                description="Your notification preferences have been reset to defaults:\n• Due date reminders: 1 day before\n• Assignment notifications: Enabled",
+                color=discord.Color.blue()
+            )
+
+            # Reset current prefs
+            self.current_prefs = {'due_date_reminder': '1_day', 'assignment_notifications': 'enabled'}
+
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            error_embed = discord.Embed(
+                title="❌ Reset Failed",
+                description="Failed to reset your preferences. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+
+    @discord.ui.button(label="❌ Close", style=discord.ButtonStyle.red)
+    async def close_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Close the settings menu."""
+        embed = discord.Embed(
+            title="✅ Settings Saved",
+            description="Your notification preferences have been saved. You can change them anytime with `/notification-settings`.",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
 
 async def main():
     """Main function to run the bot."""

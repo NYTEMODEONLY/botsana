@@ -26,6 +26,8 @@ class Guild(Base):
     configs = relationship("GuildConfig", back_populates="guild", cascade="all, delete-orphan")
     error_logs = relationship("ErrorLog", back_populates="guild", cascade="all, delete-orphan")
     user_mappings = relationship("UserMapping", back_populates="guild", cascade="all, delete-orphan")
+    notification_preferences = relationship("UserNotificationPreferences", back_populates="guild", cascade="all, delete-orphan")
+    chat_channels = relationship("ChatChannel", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -90,6 +92,40 @@ class UserMapping(Base):
 
     # Relationships
     guild = relationship("Guild", back_populates="user_mappings")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class UserNotificationPreferences(Base):
+    """User notification preferences for task updates."""
+    __tablename__ = 'user_notification_preferences'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    discord_user_id = Column(BigInteger, nullable=False)
+    due_date_reminder = Column(String(50), default='1_day')  # 'disabled', '1_hour', '1_day', '1_week'
+    assignment_notifications = Column(String(50), default='enabled')  # 'enabled', 'disabled'
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="notification_preferences")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class ChatChannel(Base):
+    """Designated channel for natural language task creation."""
+    __tablename__ = 'chat_channels'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    channel_id = Column(BigInteger, nullable=False)  # Discord channel ID
+    channel_name = Column(String(255))  # Store channel name for reference
+    created_by = Column(BigInteger, nullable=False)  # Discord user who set it
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="chat_channels")
 
     __table_args__ = {'sqlite_autoincrement': True}
 
@@ -257,6 +293,146 @@ class DatabaseManager:
                 'created_by': m.created_by,
                 'created_at': m.created_at
             } for m in mappings]
+
+    def get_user_mapping_by_asana_id(self, asana_user_id: str) -> Optional[Dict[str, Any]]:
+        """Get Discord user mapping by Asana user ID (returns first match across all guilds)."""
+        try:
+            with self.get_session() as session:
+                # Get all mappings for this Asana user and return the first one
+                # In practice, one Asana user might be mapped in multiple guilds
+                mapping = session.query(UserMapping).filter(
+                    UserMapping.asana_user_id == asana_user_id
+                ).first()
+
+                if mapping:
+                    return {
+                        'id': mapping.id,
+                        'guild_id': mapping.guild_id,
+                        'discord_user_id': mapping.discord_user_id,
+                        'discord_username': mapping.discord_username,
+                        'asana_user_id': mapping.asana_user_id,
+                        'asana_user_name': mapping.asana_user_name,
+                        'created_by': mapping.created_by,
+                        'created_at': mapping.created_at
+                    }
+                return None
+        except Exception as e:
+            print(f"Error getting user mapping by Asana ID: {e}")
+            return None
+
+    def get_notification_preferences(self, discord_user_id: int, guild_id: int) -> Optional[Dict[str, Any]]:
+        """Get notification preferences for a user."""
+        try:
+            with self.get_session() as session:
+                pref = session.query(UserNotificationPreferences).filter(
+                    UserNotificationPreferences.discord_user_id == discord_user_id,
+                    UserNotificationPreferences.guild_id == guild_id
+                ).first()
+
+                if pref:
+                    return {
+                        'due_date_reminder': pref.due_date_reminder,
+                        'assignment_notifications': pref.assignment_notifications,
+                        'created_at': pref.created_at,
+                        'updated_at': pref.updated_at
+                    }
+                return None
+        except Exception as e:
+            print(f"Error getting notification preferences: {e}")
+            return None
+
+    def set_notification_preferences(self, discord_user_id: int, guild_id: int,
+                                   due_date_reminder: str = '1_day',
+                                   assignment_notifications: str = 'enabled') -> bool:
+        """Set notification preferences for a user."""
+        try:
+            with self.get_session() as session:
+                existing = session.query(UserNotificationPreferences).filter(
+                    UserNotificationPreferences.discord_user_id == discord_user_id,
+                    UserNotificationPreferences.guild_id == guild_id
+                ).first()
+
+                if existing:
+                    # Update existing preferences
+                    existing.due_date_reminder = due_date_reminder
+                    existing.assignment_notifications = assignment_notifications
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    # Create new preferences
+                    prefs = UserNotificationPreferences(
+                        discord_user_id=discord_user_id,
+                        guild_id=guild_id,
+                        due_date_reminder=due_date_reminder,
+                        assignment_notifications=assignment_notifications
+                    )
+                    session.add(prefs)
+
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error setting notification preferences: {e}")
+            return False
+
+    def get_chat_channel(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        """Get the designated chat channel for a guild."""
+        try:
+            with self.get_session() as session:
+                channel = session.query(ChatChannel).filter(ChatChannel.guild_id == guild_id).first()
+                if channel:
+                    return {
+                        'id': channel.id,
+                        'guild_id': channel.guild_id,
+                        'channel_id': channel.channel_id,
+                        'channel_name': channel.channel_name,
+                        'created_by': channel.created_by,
+                        'created_at': channel.created_at,
+                        'updated_at': channel.updated_at
+                    }
+                return None
+        except Exception as e:
+            print(f"Error getting chat channel: {e}")
+            return None
+
+    def set_chat_channel(self, guild_id: int, channel_id: int, channel_name: str, created_by: int) -> bool:
+        """Set the designated chat channel for a guild."""
+        try:
+            with self.get_session() as session:
+                existing = session.query(ChatChannel).filter(ChatChannel.guild_id == guild_id).first()
+
+                if existing:
+                    # Update existing channel
+                    existing.channel_id = channel_id
+                    existing.channel_name = channel_name
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    # Create new channel designation
+                    channel = ChatChannel(
+                        guild_id=guild_id,
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                        created_by=created_by
+                    )
+                    session.add(channel)
+
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error setting chat channel: {e}")
+            return False
+
+    def remove_chat_channel(self, guild_id: int) -> bool:
+        """Remove the designated chat channel for a guild."""
+        try:
+            with self.get_session() as session:
+                channel = session.query(ChatChannel).filter(ChatChannel.guild_id == guild_id).first()
+                if channel:
+                    session.delete(channel)
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error removing chat channel: {e}")
+            return False
 
 # Global database manager instance
 db_manager = DatabaseManager()

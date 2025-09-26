@@ -8,6 +8,9 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - List tasks from projects
 - Support for slash commands in Discord
 - **Comprehensive Audit System** - Real-time monitoring of ALL Asana activity
+- **🤖 AI-Powered Natural Language** - Create tasks using conversational language
+- **⚙️ Bulk Operations** - Select and operate on multiple tasks at once
+- **🔔 Smart Notifications** - Personalized due date reminders and assignment alerts
 - Secure environment variable handling
 - Ready for Heroku deployment
 
@@ -17,6 +20,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - Discord Bot Token from [Discord Developer Portal](https://discord.com/developers/applications)
 - Asana Personal Access Token from [Asana Settings](https://app.asana.com/0/my-apps)
 - Asana Workspace ID and Project ID (optional)
+- **xAI API Key** from [xAI Console](https://console.x.ai/) (for AI-powered natural language processing)
 
 ## Setup
 
@@ -35,6 +39,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
      ASANA_ACCESS_TOKEN=your_asana_personal_access_token
      ASANA_WORKSPACE_ID=your_workspace_id
      ASANA_DEFAULT_PROJECT_ID=your_default_project_id
+     XAI_API_KEY=your_xai_api_key
      ```
 
 4. **Run the bot locally:**
@@ -53,6 +58,12 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/view-task task_id` - View task details
 - `/status` - Check comprehensive bot health and status
 - `/help` - Show all commands
+
+### 🤖 AI-Powered Features
+- `@Botsana Create a task to fix the login bug due tomorrow` - Create tasks using natural language in designated chat channel
+- `/set-chat-channel #channel` - Designate a channel for AI chat (Admin only)
+- `/bulk-select search:"bug" limit:10` - Select multiple tasks for batch operations
+- `/notification-settings` - Manage your notification preferences
 
 ### Audit System Setup
 - `/audit-setup` - **ADMIN ONLY** - Set up the Botsana audit category and channels
@@ -156,6 +167,164 @@ Option 3: **Bug report system** (ID: 1211480509573976)
 Just use the exact task ID to specify which one you want!
 
 **Never memorize task IDs again!** 🤖✨
+
+## 🤖 AI-Powered Chat Channel
+
+Botsana now understands natural language in designated chat channels! Mention the bot to create tasks using conversational language instead of rigid parameters.
+
+### Setup
+
+An administrator must first designate a channel for AI chat using:
+
+```
+/set-chat-channel #your-channel-name
+```
+
+Once configured, the bot will respond to @mentions in that channel.
+
+### How It Works
+
+Mention @Botsana in the designated channel and describe your task in natural language. The AI-powered parsing uses **Grok-4-Fast-Reasoning** to intelligently extract:
+- Task names and descriptions
+- Due dates (tomorrow, next week, specific dates)
+- Assignee mentions (@username)
+- Project references
+
+**Smart Fallback**: If the xAI API is unavailable, the bot automatically falls back to regex-based parsing to ensure reliability.
+
+### Examples
+
+**Simple task creation:**
+```
+@Botsana Fix the login bug
+```
+
+**With due date:**
+```
+@Botsana Create a task to review the new feature due tomorrow
+```
+
+**With assignee:**
+```
+@Botsana Schedule a meeting with the team for Friday and assign to @developer
+```
+
+**Complex task:**
+```
+@Botsana I need to update documentation for the API next week with notes about the new endpoints
+```
+
+### What It Understands
+
+- **Task Actions**: create, add, schedule, remind, I need to
+- **Due Dates**: tomorrow, today, next week, next month, specific dates (MM/DD, YYYY-MM-DD)
+- **Time References**: in 3 days, in 2 weeks
+- **Assignees**: @username mentions
+- **Projects**: "in marketing project", "for project X"
+
+### Smart Confirmation
+
+After parsing your request, Botsana replies with exactly what it understood and provides confirmation buttons. You can review the interpreted details before proceeding with task creation.
+
+### Channel Management
+
+- **Set Channel**: `/set-chat-channel #channel` (Admin only)
+- **Remove Channel**: `/remove-chat-channel` (Admin only)
+- **Check Status**: `/status` shows if chat channel is configured
+
+The bot only responds to @mentions in the designated channel, keeping regular conversation unaffected.
+
+## ⚙️ Bulk Task Operations
+
+Manage multiple tasks at once with powerful bulk operations.
+
+### Getting Started
+
+Use `/bulk-select` to choose tasks for batch operations:
+
+```
+/bulk-select search:"bug" limit:15
+```
+
+Or view recent tasks without a search term:
+```
+/bulk-select limit:10
+```
+
+### Available Operations
+
+Once you've selected tasks, choose from:
+
+- **✅ Complete All** - Mark all selected tasks as completed
+- **👤 Reassign All** - Assign all tasks to a different user
+- **📅 Update Due Dates** - Change due dates for all selected tasks
+
+### Interactive Selection
+
+- Use the dropdown to select multiple tasks (up to 25 at once)
+- See task details including assignee and due date
+- Clear selection and start over if needed
+- Proceed only when you have the right tasks selected
+
+### Bulk Results
+
+After operations complete, Botsana shows detailed results:
+- How many tasks were successfully updated
+- Which tasks failed (if any) and why
+- Confirmation of all changes made
+
+## 🔔 Smart Notification System
+
+Get personalized notifications about task updates delivered directly to your DMs.
+
+### Notification Types
+
+- **📅 Due Date Reminders** - Get notified when tasks are approaching their due dates
+- **👥 Assignment Notifications** - Receive alerts when tasks are assigned to you
+
+### Customizable Preferences
+
+Use `/notification-settings` to control when and how you receive notifications:
+
+**Due Date Reminders:**
+- 1 day before due date
+- 1 hour before due date
+- 1 week before due date
+- Disabled
+
+**Assignment Notifications:**
+- Enabled (default)
+- Disabled
+
+### How It Works
+
+1. **Personalized**: Only you receive notifications about your tasks
+2. **Respectful**: Honors your preferences - no spam if you disable notifications
+3. **Informative**: Includes task details, time remaining, and quick action links
+4. **Private**: Sent via DM to keep your inbox clean
+
+### Example Notifications
+
+**Due Date Reminder:**
+```
+⏰ Task Due Tomorrow
+This task is due within the next 24 hours.
+
+📋 Fix Login Bug
+📅 Due Date: 2025-01-15
+⏰ Time Remaining: 1 day
+🔗 View Task: Use /view-task task_id:12345
+```
+
+**Assignment Notification:**
+```
+📋 Task Assigned to You
+You have been assigned to: Fix Login Bug
+
+📝 Task: Fix Login Bug
+📅 Due Date: 2025-01-15
+🔗 View Task: Use /view-task task_id:12345
+```
 
 ## Audit System
 
@@ -278,6 +447,7 @@ The `/status` command provides comprehensive system health information:
    heroku config:set ASANA_ACCESS_TOKEN=your_asana_personal_access_token
    heroku config:set ASANA_WORKSPACE_ID=your_workspace_id
    heroku config:set ASANA_DEFAULT_PROJECT_ID=your_default_project_id
+   heroku config:set XAI_API_KEY=your_xai_api_key
    ```
 
 3. **Deploy to Heroku:**
@@ -300,6 +470,16 @@ The `/status` command provides comprehensive system health information:
    - Look at the URL when you're in your Asana workspace
    - The ID is the long number in the URL (e.g., `1234567890123456`)
 
+### Getting Your xAI API Key
+
+1. **Go to [xAI Console](https://console.x.ai/)**
+2. **Sign in** with your xAI account
+3. **Navigate to API Keys** section
+4. **Create a new API key** for your project
+5. **Copy the API key** - it will look like: `xai-...`
+
+The bot uses the `grok-4-fast-reasoning` model for advanced natural language processing of task creation requests.
+
 ### Updating Environment Variables
 
 If you need to update credentials after deployment:
@@ -308,6 +488,7 @@ If you need to update credentials after deployment:
 heroku config:set ASANA_ACCESS_TOKEN=your_new_token
 heroku config:set ASANA_WORKSPACE_ID=your_workspace_id
 heroku config:set ASANA_DEFAULT_PROJECT_ID=your_project_id
+heroku config:set XAI_API_KEY=your_new_xai_api_key
 ```
 
 **Bot Commands:**
