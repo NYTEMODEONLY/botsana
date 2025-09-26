@@ -980,6 +980,26 @@ async def update_task_command(
                 await interaction.followup.send(embed=embed)
                 return
 
+        # Validate that at least one update parameter is provided
+        if not any([name, assignee, due_date, notes]):
+            embed = discord.Embed(
+                title="❌ No Updates Specified",
+                description="Please specify what you want to update in the task.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(
+                name="Available Update Options:",
+                value="• `name` - Change the task name\n• `assignee` - Assign to a Discord user (@mention)\n• `due_date` - Set due date (YYYY-MM-DD)\n• `notes` - Update task description",
+                inline=False
+            )
+            embed.add_field(
+                name="Examples:",
+                value="• `/update-task task:\"fix bug\" assignee:@developer`\n• `/update-task task:\"review code\" due_date:\"2025-12-31\"`\n• `/update-task task:\"task name\" name:\"New task name\"`",
+                inline=False
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
         # Find the task by ID or name
         task_id = None
         task_data = None
