@@ -57,6 +57,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/audit-setup` - **ADMIN ONLY** - Set up the Botsana audit category and channels
 - `/set-audit-log` - **ADMIN ONLY** - Configure the error logging channel
 - `/set-default-project` - **ADMIN ONLY** - Set default project for task creation
+- `/view-error-logs` - **ADMIN ONLY** - View recent error logs
 
 ## Audit System
 
@@ -110,6 +111,27 @@ Each error includes:
 - Command that triggered the error
 - Timestamp and detailed stack traces
 - Severity levels (ERROR, CRITICAL, WARNING)
+
+### Database Persistence
+
+Botsana uses **PostgreSQL database** for persistent storage that survives Heroku restarts and deployments:
+
+#### Data Storage:
+- **Guild configurations** - Audit channels, default projects
+- **Error logs** - Complete error history with context
+- **System statistics** - Bot usage and performance metrics
+
+#### Database Features:
+- **Automatic table creation** on first run
+- **Connection pooling** for performance
+- **Data integrity** with foreign keys and constraints
+- **Migration-safe** schema design
+
+#### Free Tier Limits:
+- Heroku Postgres Essential-0: 1GB storage, 20 connections
+- Suitable for most Discord bots with moderate usage
+
+**All configuration and logs persist through restarts, deployments, and crashes.**
 
 ## Heroku Deployment
 
