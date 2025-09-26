@@ -25,6 +25,13 @@ load_dotenv()
 
 def confirm_action():
     """Get user confirmation before proceeding."""
+    import sys
+
+    # Check for auto-confirm flag
+    if len(sys.argv) > 1 and sys.argv[1] == "--confirm":
+        print("🔄 Auto-confirmed via command line flag")
+        return True
+
     print("⚠️  WARNING: This will DELETE ALL DATA in the database!")
     print("This action cannot be undone.")
     print()
