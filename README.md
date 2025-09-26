@@ -45,12 +45,12 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 ## Discord Commands
 
 ### Task Management
-- `/create-task name:"Task name" due:"2025-12-31" project:"Project ID"` - Create a new task
-- `/update-task id:12345 name:"New name" due:"2025-12-31"` - Update an existing task
-- `/complete-task id:12345` - Mark a task as completed
+- `/create-task name:"Task name" assignee:@user due:"2025-12-31"` - Create a new task (auto-assigns to you if no assignee)
+- `/update-task task:"Task name or ID" assignee:@user name:"New name"` - Update existing tasks (smart task finding)
+- `/complete-task task:"Task name or ID"` - Mark tasks as completed (finds by name or ID)
 - `/list-tasks project:"Project ID"` - List tasks in a project
-- `/delete-task id:12345` - Delete a task
-- `/view-task id:12345` - View task details
+- `/delete-task task:"Task name or ID"` - Delete tasks (finds by name or ID)
+- `/view-task task_id` - View task details
 - `/status` - Check comprehensive bot health and status
 - `/help` - Show all commands
 
@@ -109,6 +109,52 @@ It will automatically assign the task to your Asana account (assuming you've bee
 4. Mapping is created instantly!
 
 **No more manual Asana ID hunting!** 🎉
+
+## Smart Task Operations
+
+Botsana is intelligent about finding and managing tasks across your workspace. You can reference tasks by **name** or **ID** - the bot will figure out what you mean!
+
+### Task Identification
+- **By ID**: Use the exact numeric task ID (`/complete-task task:"1211480509573974"`)
+- **By Name**: Use partial or full task names (`/complete-task task:"fix login bug"`)
+- **Smart Search**: Bot searches your tasks and shows matches if multiple are found
+- **Cross-Project**: Finds tasks across all projects you have access to
+
+### Examples
+
+**Complete a task:**
+```
+/complete-task task:"fix login bug"
+/complete-task task:"1211480509573974"
+```
+
+**Update a task:**
+```
+/update-task task:"review code" assignee:@developer due_date:"2025-12-31"
+/update-task task:"1211480509573974" name:"Updated task name"
+```
+
+**Delete a task:**
+```
+/delete-task task:"old task to remove"
+/delete-task task:"1211480509573974"
+```
+
+### When Multiple Tasks Match
+
+If your search matches multiple tasks, Botsana will show you options:
+```
+🎯 Multiple Tasks Found
+Found 3 tasks matching 'bug'
+
+Option 1: **Fix login bug** (ID: 1211480509573974)
+Option 2: **Bug in homepage** (ID: 1211480509573975)
+Option 3: **Bug report system** (ID: 1211480509573976)
+```
+
+Just use the exact task ID to specify which one you want!
+
+**Never memorize task IDs again!** 🤖✨
 
 ## Audit System
 

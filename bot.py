@@ -224,6 +224,90 @@ class AsanaManager:
             logger.error(f"Error retrieving workspace users: {e}")
             raise
 
+    async def search_tasks(self, query: str, project_id: Optional[str] = None, assignee: Optional[str] = None,
+                          limit: int = 10) -> List[Dict[str, Any]]:
+        """Search for tasks by name across projects or in a specific project."""
+        try:
+            tasks = []
+
+            if project_id:
+                # Search in specific project
+                result = self.client.tasks.get_tasks_for_project(
+                    project_id,
+                    opt_fields='name,due_on,assignee.name,completed,notes,projects.name'
+                )
+                project_tasks = list(result)
+                # Filter by query
+                tasks = [task for task in project_tasks
+                        if query.lower() in task.get('name', '').lower() and not task.get('completed', False)]
+            else:
+                # Search across all accessible projects (this is more complex in Asana API)
+                # For now, search in default project and any projects the user has access to
+                projects_to_search = []
+
+                if self.default_project_id:
+                    projects_to_search.append(self.default_project_id)
+
+                # Try to get user's projects (this might require different API calls)
+                try:
+                    if assignee:
+                        # If we have an assignee, we can get their tasks
+                        user_tasks = self.client.tasks.get_tasks_for_user(
+                            assignee,
+                            workspace=self.workspace_id,
+                            opt_fields='name,due_on,assignee.name,completed,notes,projects.name'
+                        )
+                        user_task_list = list(user_tasks)
+                        tasks = [task for task in user_task_list
+                                if query.lower() in task.get('name', '').lower() and not task.get('completed', False)]
+                    else:
+                        # Search in default project only for now
+                        if self.default_project_id:
+                            result = self.client.tasks.get_tasks_for_project(
+                                self.default_project_id,
+                                opt_fields='name,due_on,assignee.name,completed,notes,projects.name'
+                            )
+                            project_tasks = list(result)
+                            tasks = [task for task in project_tasks
+                                    if query.lower() in task.get('name', '').lower() and not task.get('completed', False)]
+                except Exception as e:
+                    logger.warning(f"Could not search across projects: {e}")
+                    # Fall back to default project
+                    if self.default_project_id:
+                        result = self.client.tasks.get_tasks_for_project(
+                            self.default_project_id,
+                            opt_fields='name,due_on,assignee.name,completed,notes,projects.name'
+                        )
+                        project_tasks = list(result)
+                        tasks = [task for task in project_tasks
+                                if query.lower() in task.get('name', '').lower() and not task.get('completed', False)]
+
+            # Limit results
+            tasks = tasks[:limit]
+            logger.info(f"Found {len(tasks)} tasks matching '{query}'")
+            return tasks
+
+        except Exception as e:
+            logger.error(f"Error searching tasks: {e}")
+            raise
+
+    async def find_task_by_name(self, name: str, project_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Find a single task by exact name match."""
+        try:
+            tasks = await self.search_tasks(name, project_id, limit=5)
+
+            # Look for exact match first
+            for task in tasks:
+                if task.get('name', '').strip().lower() == name.strip().lower():
+                    return task
+
+            # If no exact match, return the first partial match
+            return tasks[0] if tasks else None
+
+        except Exception as e:
+            logger.error(f"Error finding task by name: {e}")
+            return None
+
     async def get_task(self, task_id: str) -> Dict[str, Any]:
         """Get a specific task by ID."""
         try:
@@ -863,17 +947,17 @@ async def create_task_command(
 
 @bot.tree.command(name="update-task", description="Update an existing task in Asana")
 @app_commands.describe(
-    task_id="Task ID to update (required)",
+    task="Task ID or task name to update (required)",
     name="New task name (optional)",
-    assignee="New assignee email or ID (optional)",
+    assignee="New assignee Discord user (optional)",
     due_date="New due date in YYYY-MM-DD format (optional)",
     notes="New task notes/description (optional)"
 )
 async def update_task_command(
     interaction: discord.Interaction,
-    task_id: str,
+    task: str,
     name: Optional[str] = None,
-    assignee: Optional[str] = None,
+    assignee: Optional[discord.Member] = None,
     due_date: Optional[str] = None,
     notes: Optional[str] = None
 ):
@@ -881,25 +965,118 @@ async def update_task_command(
     await interaction.response.defer()
 
     try:
-        task = await asana_manager.update_task(
+        # Resolve assignee - handle Discord user mentions
+        asana_assignee = None
+        if assignee:
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
+            if user_mapping:
+                asana_assignee = user_mapping['asana_user_id']
+            else:
+                embed = discord.Embed(
+                    title="❌ User Not Mapped",
+                    description=f"{assignee.mention} is not mapped to an Asana user. Use `/map-user @{assignee.name}` first.",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+        # Find the task by ID or name
+        task_id = None
+        task_data = None
+
+        # Check if it's a valid task ID (numeric)
+        if task.isdigit():
+            try:
+                task_data = await asana_manager.get_task(task)
+                task_id = task
+            except Exception:
+                pass  # Not a valid task ID, try searching by name
+
+        # If not a valid ID or task not found, search by name
+        if not task_data:
+            # Get the user's Asana ID for searching their tasks
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            assignee_id = user_mapping['asana_user_id'] if user_mapping else None
+
+            # Search for the task by name
+            matching_tasks = await asana_manager.search_tasks(task, assignee=assignee_id, limit=5)
+
+            if not matching_tasks:
+                embed = discord.Embed(
+                    title="❌ Task Not Found",
+                    description=f"No active task found matching '{task}'.",
+                    color=discord.Color.red()
+                )
+                embed.add_field(
+                    name="💡 Try:",
+                    value="• Use the exact task name\n• Use the task ID if you know it\n• Check that the task isn't already completed",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            if len(matching_tasks) > 1:
+                # Multiple matches - show options
+                embed = discord.Embed(
+                    title="🎯 Multiple Tasks Found",
+                    description=f"Found {len(matching_tasks)} tasks matching '{task}'. Please be more specific or use the task ID.",
+                    color=discord.Color.yellow()
+                )
+
+                for i, t in enumerate(matching_tasks[:3], 1):
+                    task_name = t.get('name', 'Unknown Task')
+                    task_id_match = t.get('gid', t.get('id', 'Unknown'))
+                    embed.add_field(
+                        name=f"Option {i}",
+                        value=f"**{task_name}**\nID: `{task_id_match}`",
+                        inline=True
+                    )
+
+                await interaction.followup.send(embed=embed)
+                return
+
+            # Single match
+            task_data = matching_tasks[0]
+            task_id = task_data.get('gid', task_data.get('id'))
+
+        # Update the task
+        updated_task = await asana_manager.update_task(
             task_id=task_id,
             name=name,
-            assignee=assignee,
+            assignee=asana_assignee,
             due_date=due_date,
             notes=notes
         )
 
         embed = discord.Embed(
             title="✅ Task Updated",
-            description=f"**{task['name']}**",
+            description=f"**{updated_task['name']}**",
             color=discord.Color.blue()
         )
 
-        embed.add_field(name="Task ID", value=task['gid'], inline=True)
-        if task.get('due_on'):
-            embed.add_field(name="Due Date", value=task['due_on'], inline=True)
-        if task.get('assignee'):
-            embed.add_field(name="Assignee", value=task['assignee']['name'], inline=True)
+        embed.add_field(name="Task ID", value=updated_task.get('gid', task_id), inline=True)
+        if updated_task.get('due_on'):
+            embed.add_field(name="Due Date", value=updated_task['due_on'], inline=True)
+        if updated_task.get('assignee'):
+            embed.add_field(name="Assignee", value=updated_task['assignee']['name'], inline=True)
+
+        # Show what was updated
+        updates = []
+        if name:
+            updates.append(f"📝 Name: {name}")
+        if assignee:
+            updates.append(f"👤 Assignee: {assignee.mention}")
+        if due_date:
+            updates.append(f"📅 Due Date: {due_date}")
+        if notes:
+            updates.append(f"📋 Notes: Updated")
+
+        if updates:
+            embed.add_field(
+                name="Changes Made",
+                value="\n".join(updates),
+                inline=False
+            )
 
         await interaction.followup.send(embed=embed)
 
@@ -914,25 +1091,85 @@ async def update_task_command(
 
 @bot.tree.command(name="complete-task", description="Mark a task as completed in Asana")
 @app_commands.describe(
-    task_id="Task ID to complete (required)"
+    task="Task ID or task name to complete (required)"
 )
 async def complete_task_command(
     interaction: discord.Interaction,
-    task_id: str
+    task: str
 ):
     """Mark a task as completed in Asana."""
     await interaction.response.defer()
 
     try:
-        task = await asana_manager.complete_task(task_id)
+        # Try to parse as task ID first
+        task_id = None
+        task_data = None
+
+        # Check if it's a valid task ID (numeric)
+        if task.isdigit():
+            try:
+                task_data = await asana_manager.get_task(task)
+                task_id = task
+            except Exception:
+                pass  # Not a valid task ID, try searching by name
+
+        # If not a valid ID or task not found, search by name
+        if not task_data:
+            # Get the user's Asana ID for searching their tasks
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            assignee_id = user_mapping['asana_user_id'] if user_mapping else None
+
+            # Search for the task by name
+            matching_tasks = await asana_manager.search_tasks(task, assignee=assignee_id, limit=5)
+
+            if not matching_tasks:
+                embed = discord.Embed(
+                    title="❌ Task Not Found",
+                    description=f"No active task found matching '{task}'.",
+                    color=discord.Color.red()
+                )
+                embed.add_field(
+                    name="💡 Try:",
+                    value="• Use the exact task name\n• Use the task ID if you know it\n• Check that the task isn't already completed",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            if len(matching_tasks) > 1:
+                # Multiple matches - show options
+                embed = discord.Embed(
+                    title="🎯 Multiple Tasks Found",
+                    description=f"Found {len(matching_tasks)} tasks matching '{task}'. Please be more specific or use the task ID.",
+                    color=discord.Color.yellow()
+                )
+
+                for i, t in enumerate(matching_tasks[:3], 1):
+                    task_name = t.get('name', 'Unknown Task')
+                    task_id_match = t.get('gid', t.get('id', 'Unknown'))
+                    embed.add_field(
+                        name=f"Option {i}",
+                        value=f"**{task_name}**\nID: `{task_id_match}`",
+                        inline=True
+                    )
+
+                await interaction.followup.send(embed=embed)
+                return
+
+            # Single match
+            task_data = matching_tasks[0]
+            task_id = task_data.get('gid', task_data.get('id'))
+
+        # Complete the task
+        completed_task = await asana_manager.complete_task(task_id)
 
         embed = discord.Embed(
             title="✅ Task Completed",
-            description=f"**{task['name']}** has been marked as completed!",
+            description=f"**{completed_task['name']}** has been marked as completed!",
             color=discord.Color.green()
         )
 
-        embed.add_field(name="Task ID", value=task['gid'], inline=True)
+        embed.add_field(name="Task ID", value=completed_task.get('gid', task_id), inline=True)
 
         await interaction.followup.send(embed=embed)
 
@@ -1030,25 +1267,85 @@ async def list_tasks_command(
 
 @bot.tree.command(name="delete-task", description="Delete a task from Asana")
 @app_commands.describe(
-    task_id="Task ID to delete (required)"
+    task="Task ID or task name to delete (required)"
 )
 async def delete_task_command(
     interaction: discord.Interaction,
-    task_id: str
+    task: str
 ):
     """Delete a task from Asana."""
     await interaction.response.defer()
 
     try:
-        # First get the task details for confirmation
-        task = await asana_manager.get_task(task_id)
+        # Find the task by ID or name
+        task_id = None
+        task_data = None
+
+        # Check if it's a valid task ID (numeric)
+        if task.isdigit():
+            try:
+                task_data = await asana_manager.get_task(task)
+                task_id = task
+            except Exception:
+                pass  # Not a valid task ID, try searching by name
+
+        # If not a valid ID or task not found, search by name
+        if not task_data:
+            # Get the user's Asana ID for searching their tasks
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, interaction.user.id)
+            assignee_id = user_mapping['asana_user_id'] if user_mapping else None
+
+            # Search for the task by name
+            matching_tasks = await asana_manager.search_tasks(task, assignee=assignee_id, limit=5)
+
+            if not matching_tasks:
+                embed = discord.Embed(
+                    title="❌ Task Not Found",
+                    description=f"No active task found matching '{task}'.",
+                    color=discord.Color.red()
+                )
+                embed.add_field(
+                    name="💡 Try:",
+                    value="• Use the exact task name\n• Use the task ID if you know it\n• Check that the task isn't already completed",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            if len(matching_tasks) > 1:
+                # Multiple matches - show options
+                embed = discord.Embed(
+                    title="🎯 Multiple Tasks Found",
+                    description=f"Found {len(matching_tasks)} tasks matching '{task}'. Please be more specific or use the task ID.",
+                    color=discord.Color.yellow()
+                )
+
+                for i, t in enumerate(matching_tasks[:3], 1):
+                    task_name = t.get('name', 'Unknown Task')
+                    task_id_match = t.get('gid', t.get('id', 'Unknown'))
+                    embed.add_field(
+                        name=f"Option {i}",
+                        value=f"**{task_name}**\nID: `{task_id_match}`",
+                        inline=True
+                    )
+
+                await interaction.followup.send(embed=embed)
+                return
+
+            # Single match
+            task_data = matching_tasks[0]
+            task_id = task_data.get('gid', task_data.get('id'))
+
+        # Get task details before deletion for confirmation
+        task_details = await asana_manager.get_task(task_id)
+        task_name = task_details.get('name', 'Unknown Task')
 
         # Delete the task
         await asana_manager.delete_task(task_id)
 
         embed = discord.Embed(
             title="🗑️ Task Deleted",
-            description=f"**{task['name']}** has been deleted from Asana.",
+            description=f"**{task_name}** has been deleted from Asana.",
             color=discord.Color.red()
         )
 
