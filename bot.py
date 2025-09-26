@@ -254,19 +254,43 @@ class AuditManager:
 
     async def setup_audit_channels(self, guild: discord.Guild) -> discord.CategoryChannel:
         """Create the Botsana audit category and channels."""
-        # Create category
-        category = await guild.create_category("🤖 Botsana")
+        # Check if category already exists
+        category = discord.utils.get(guild.categories, name="🤖 Botsana")
 
-        # Create channels
+        if category:
+            # Category exists, try to find existing channels
+            await self._populate_existing_channels(guild, category)
+        else:
+            # Create new category
+            category = await guild.create_category("🤖 Botsana")
+
+        # Ensure all required channels exist
         for channel_name, description in AUDIT_CHANNELS.items():
-            channel = await guild.create_text_channel(
-                channel_name,
-                category=category,
-                topic=description
-            )
-            self.audit_channels[channel_name] = channel
+            if channel_name not in self.audit_channels:
+                # Channel doesn't exist or isn't accessible, create it
+                try:
+                    channel = await guild.create_text_channel(
+                        channel_name,
+                        category=category,
+                        topic=description
+                    )
+                    self.audit_channels[channel_name] = channel
+                except discord.Forbidden:
+                    logger.error(f"Cannot create channel {channel_name}: Missing permissions")
+                except Exception as e:
+                    logger.error(f"Failed to create channel {channel_name}: {e}")
 
         return category
+
+    async def _populate_existing_channels(self, guild: discord.Guild, category: discord.CategoryChannel):
+        """Populate audit_channels dict with existing channels in the category."""
+        for channel in category.channels:
+            if isinstance(channel, discord.TextChannel):
+                # Check if this is one of our audit channels
+                for audit_name in AUDIT_CHANNELS.keys():
+                    if channel.name == audit_name:
+                        self.audit_channels[audit_name] = channel
+                        break
 
     async def register_webhooks(self, base_url: str) -> bool:
         """Register Asana webhooks for the workspace."""
@@ -941,46 +965,16 @@ async def audit_setup_command(interaction: discord.Interaction):
     await interaction.response.defer()
 
     try:
-        # Check if audit system is already set up
-        botsana_category = discord.utils.get(interaction.guild.categories, name="🤖 Botsana")
-        if botsana_category:
-            embed = discord.Embed(
-                title="⚠️ Audit System Already Exists",
-                description="The Botsana audit system is already set up in this server.",
-                color=discord.Color.yellow()
-            )
-            embed.add_field(
-                name="Category",
-                value=botsana_category.mention,
-                inline=True
-            )
-            await interaction.followup.send(embed=embed)
-            return
-
-        # Create audit channels
+        # Create audit channels (this will repair if needed)
         category = await audit_manager.setup_audit_channels(interaction.guild)
+
+        # Check how many channels we actually have
+        working_channels = len(audit_manager.audit_channels)
+        total_channels = len(AUDIT_CHANNELS)
 
         # Register webhooks
         base_url = os.getenv('HEROKU_URL', f"https://{os.getenv('HEROKU_APP_NAME', 'botsana-discord-bot')}.herokuapp.com")
-        embed.add_field(
-            name="🔗 Webhook Setup",
-            value=f"Registering webhooks at {base_url}/webhook",
-            inline=False
-        )
-
         webhook_result = await audit_manager.register_webhooks(base_url)
-        if webhook_result:
-            embed.add_field(
-                name="✅ Webhooks",
-                value=f"Registered {len(audit_manager.webhooks)} webhook(s)",
-                inline=True
-            )
-        else:
-            embed.add_field(
-                name="⚠️ Webhooks",
-                value="Failed to register webhooks",
-                inline=True
-            )
 
         # Start periodic tasks
         scheduler.add_job(audit_manager.check_missed_deadlines, 'cron', hour=9, minute=0)  # Daily at 9 AM
@@ -989,38 +983,54 @@ async def audit_setup_command(interaction: discord.Interaction):
         if not scheduler.running:
             scheduler.start()
 
-        embed = discord.Embed(
-            title="✅ Audit System Setup Complete",
-            description="Botsana audit channels have been created and configured!",
-            color=discord.Color.green()
-        )
+        # Create response embed
+        if working_channels == total_channels:
+            embed = discord.Embed(
+                title="✅ Audit System Setup Complete",
+                description="Botsana audit channels have been created and configured!",
+                color=discord.Color.green()
+            )
+        else:
+            embed = discord.Embed(
+                title="⚠️ Audit System Setup Partial",
+                description=f"Audit system setup completed, but only {working_channels}/{total_channels} channels are accessible.",
+                color=discord.Color.yellow()
+            )
 
         embed.add_field(
-            name="📁 Category Created",
+            name="📁 Category",
             value=category.mention,
             inline=True
         )
 
         embed.add_field(
-            name="📺 Channels Created",
-            value=str(len(AUDIT_CHANNELS)),
+            name="📺 Working Channels",
+            value=f"{working_channels}/{total_channels}",
             inline=True
         )
 
-        channels_list = "\n".join([f"• `{name}` - {desc}" for name, desc in AUDIT_CHANNELS.items()])
+        # Show webhook status
+        if webhook_result:
+            embed.add_field(
+                name="🔗 Webhooks",
+                value=f"✅ Registered {len(audit_manager.webhooks)} webhook(s)",
+                inline=True
+            )
+        else:
+            embed.add_field(
+                name="🔗 Webhooks",
+                value="⚠️ Failed to register webhooks",
+                inline=True
+            )
+
+        channels_list = "\n".join([f"• `{name}` - {'✅' if name in audit_manager.audit_channels else '❌'} {desc}" for name, desc in AUDIT_CHANNELS.items()])
         embed.add_field(
-            name="📋 Available Channels",
+            name="📋 Channel Status",
             value=channels_list,
             inline=False
         )
 
-        embed.add_field(
-            name="🔗 Webhook Status",
-            value="✅ Registered for real-time updates",
-            inline=True
-        )
-
-        embed.set_footer(text="The audit system will now automatically monitor all Asana activity!")
+        embed.set_footer(text="Use /test-audit to verify all channels are working properly")
 
         await interaction.followup.send(embed=embed)
 
@@ -1339,8 +1349,11 @@ async def test_audit_command(interaction: discord.Interaction):
         test_results = {}
         for channel_name, description in AUDIT_CHANNELS.items():
             try:
-                success = await audit_manager.send_audit_embed(channel_name, embed)
-                test_results[channel_name] = "✅" if success else "❌"
+                if channel_name in audit_manager.audit_channels:
+                    success = await audit_manager.send_audit_embed(channel_name, embed)
+                    test_results[channel_name] = "✅" if success else "❌"
+                else:
+                    test_results[channel_name] = "❌ (Not found)"
             except Exception as e:
                 test_results[channel_name] = f"❌ ({str(e)[:20]}...)"
 
@@ -1398,6 +1411,82 @@ async def test_audit_error(interaction: discord.Interaction, error):
             await interaction.followup.send(embed=embed)
     else:
         logger.error(f"Test audit error: {error}")
+
+@bot.tree.command(name="repair-audit", description="Repair/reset the audit system")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def repair_audit_command(interaction: discord.Interaction):
+    """Repair or reset the audit system by clearing the channel cache and re-setup."""
+    await interaction.response.defer()
+
+    try:
+        # Clear the audit channels cache
+        audit_manager.audit_channels.clear()
+
+        # Re-run setup
+        category = await audit_manager.setup_audit_channels(interaction.guild)
+
+        working_channels = len(audit_manager.audit_channels)
+        total_channels = len(AUDIT_CHANNELS)
+
+        embed = discord.Embed(
+            title="🔧 Audit System Repaired",
+            description="Audit system has been reset and repaired.",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="📁 Category",
+            value=category.mention,
+            inline=True
+        )
+
+        embed.add_field(
+            name="📺 Channels Repaired",
+            value=f"{working_channels}/{total_channels}",
+            inline=True
+        )
+
+        # Show status of each channel
+        channel_status = []
+        for name in AUDIT_CHANNELS.keys():
+            status = "✅" if name in audit_manager.audit_channels else "❌"
+            channel_status.append(f"• `{name}`: {status}")
+
+        embed.add_field(
+            name="📋 Channel Status",
+            value="\n".join(channel_status),
+            inline=False
+        )
+
+        embed.set_footer(text="Run /test-audit to verify everything is working")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "repair-audit")
+
+        embed = discord.Embed(
+            title="❌ Repair Failed",
+            description=f"Failed to repair audit system: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@repair_audit_command.error
+async def repair_audit_error(interaction: discord.Interaction, error):
+    """Handle repair audit command errors."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = discord.Embed(
+            title="❌ Administrator Required",
+            description="You need Administrator permissions to repair the audit system.",
+            color=discord.Color.red()
+        )
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+    else:
+        logger.error(f"Repair audit error: {error}")
 
 @bot.tree.command(name="status", description="Check Botsana's comprehensive system status")
 async def status_command(interaction: discord.Interaction):

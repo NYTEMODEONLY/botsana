@@ -59,6 +59,8 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/set-audit-log` - **ADMIN ONLY** - Configure the error logging channel
 - `/set-default-project` - **ADMIN ONLY** - Set default project for task creation
 - `/view-error-logs` - **ADMIN ONLY** - View recent error logs
+- `/test-audit` - **ADMIN ONLY** - Test audit system functionality
+- `/repair-audit` - **ADMIN ONLY** - Repair/reset the audit system
 
 ## Audit System
 
