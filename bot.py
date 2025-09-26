@@ -20,7 +20,7 @@ import json
 from datetime import datetime, timedelta
 from config import bot_config
 from error_logger import init_error_logger
-from database import db_manager
+from database import db_manager, ErrorLog
 from sqlalchemy import text
 
 # Load environment variables
@@ -1194,9 +1194,9 @@ async def view_error_logs_command(interaction: discord.Interaction, limit: Optio
             limit = 25  # Discord embed limits
 
         with db_manager.get_session() as session:
-            error_logs = session.query(db_manager.ErrorLog).filter(
-                db_manager.ErrorLog.guild_id == interaction.guild.id
-            ).order_by(db_manager.ErrorLog.created_at.desc()).limit(limit).all()
+            error_logs = session.query(ErrorLog).filter(
+                ErrorLog.guild_id == interaction.guild.id
+            ).order_by(ErrorLog.created_at.desc()).limit(limit).all()
 
         if not error_logs:
             embed = discord.Embed(
@@ -1409,9 +1409,9 @@ async def get_error_statistics(guild_id: int) -> str:
         with db_manager.get_session() as session:
             # Get error count from last 24 hours
             yesterday = datetime.now() - timedelta(days=1)
-            error_count = session.query(db_manager.ErrorLog).filter(
-                db_manager.ErrorLog.guild_id == guild_id,
-                db_manager.ErrorLog.created_at >= yesterday
+            error_count = session.query(ErrorLog).filter(
+                ErrorLog.guild_id == guild_id,
+                ErrorLog.created_at >= yesterday
             ).count()
 
             if error_count == 0:
