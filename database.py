@@ -6,7 +6,7 @@ Provides persistent storage using SQLAlchemy with PostgreSQL.
 import os
 from datetime import datetime
 from typing import Optional, Dict, Any
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, JSON, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, JSON, ForeignKey, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import QueuePool
@@ -17,7 +17,7 @@ class Guild(Base):
     """Represents a Discord guild/server."""
     __tablename__ = 'guilds'
 
-    id = Column(Integer, primary_key=True)  # Discord guild ID
+    id = Column(BigInteger, primary_key=True)  # Discord guild ID (snowflake)
     name = Column(String(255))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -31,7 +31,7 @@ class GuildConfig(Base):
     __tablename__ = 'guild_configs'
 
     id = Column(Integer, primary_key=True)
-    guild_id = Column(Integer, ForeignKey('guilds.id'), nullable=False)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
     key = Column(String(255), nullable=False)
     value = Column(Text)  # JSON string for complex values
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -47,7 +47,7 @@ class ErrorLog(Base):
     __tablename__ = 'error_logs'
 
     id = Column(Integer, primary_key=True)
-    guild_id = Column(Integer, ForeignKey('guilds.id'))
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'))
     user_id = Column(Integer)
     severity = Column(String(20), default='ERROR')  # ERROR, CRITICAL, WARNING, INFO
     error_type = Column(String(255))
@@ -118,8 +118,13 @@ class DatabaseManager:
             self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
             # Create all tables
-            Base.metadata.create_all(bind=self.engine)
-            print("✅ Database initialized successfully")
+            try:
+                Base.metadata.create_all(bind=self.engine)
+                print("✅ Database initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not create tables: {e}")
+                print("This might be due to existing tables with different schema.")
+                print("Consider running database migrations or dropping tables manually.")
 
         except Exception as e:
             print(f"❌ Database initialization failed: {e}")

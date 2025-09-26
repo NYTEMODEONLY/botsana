@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from config import bot_config
 from error_logger import init_error_logger
 from database import db_manager
+from sqlalchemy import text
 
 # Load environment variables
 load_dotenv()
@@ -1382,7 +1383,7 @@ async def test_database_connection() -> str:
     try:
         with db_manager.get_session() as session:
             # Simple query to test connection
-            result = session.execute("SELECT 1").scalar()
+            result = session.execute(text("SELECT 1")).scalar()
             return "✅ Connected"
     except Exception as e:
         return f"❌ Connection Failed\n💬 {str(e)[:50]}..."
