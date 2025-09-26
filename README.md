@@ -87,37 +87,48 @@ The Botsana audit system provides **real-time monitoring of ALL Asana activity**
 
 ## Heroku Deployment
 
-✅ **Already Deployed!** The bot is live at: https://botsana-discord-bot-84a05a4a51d3.herokuapp.com/
-
-**Current Status:**
-- ✅ Code deployed to Heroku
-- ✅ Discord token configured
-- ✅ Asana Personal Access Token configured
-- ✅ Asana Workspace ID configured
-- ✅ **FULLY OPERATIONAL** 🚀
-
-**Setup Complete!** 🎉
-
-All credentials have been configured and the bot is fully operational. The audit system is ready to be activated with `/audit-setup` in your Discord server.
-
-**For Future Reference - How to Configure Credentials:**
-
-If you need to update credentials in the future:
-
-1. **Update Asana environment variables in Heroku:**
+1. **Create a Heroku app:**
    ```bash
-   heroku config:set ASANA_ACCESS_TOKEN=your_new_token
-   heroku config:set ASANA_WORKSPACE_ID=your_workspace_id
-   heroku config:set ASANA_DEFAULT_PROJECT_ID=your_project_id
+   heroku create your-app-name
    ```
 
-2. **Get your Asana Personal Access Token:**
+2. **Set environment variables in Heroku:**
+   ```bash
+   heroku config:set DISCORD_TOKEN=your_discord_bot_token
+   heroku config:set ASANA_ACCESS_TOKEN=your_asana_personal_access_token
+   heroku config:set ASANA_WORKSPACE_ID=your_workspace_id
+   heroku config:set ASANA_DEFAULT_PROJECT_ID=your_default_project_id
+   ```
+
+3. **Deploy to Heroku:**
+   ```bash
+   git add .
+   git commit -m "Initial commit"
+   git push heroku main
+   ```
+
+## Configuration
+
+### Getting Your Asana Credentials
+
+1. **Asana Personal Access Token:**
    - Go to [Asana Settings → Apps → Personal Access Tokens](https://app.asana.com/0/my-apps)
    - Create a new token with appropriate permissions
+   - It will look like: `1/1234567890:abcdef...`
 
-3. **Find your Asana Workspace ID:**
+2. **Asana Workspace ID:**
    - Look at the URL when you're in your Asana workspace
    - The ID is the long number in the URL (e.g., `1234567890123456`)
+
+### Updating Environment Variables
+
+If you need to update credentials after deployment:
+
+```bash
+heroku config:set ASANA_ACCESS_TOKEN=your_new_token
+heroku config:set ASANA_WORKSPACE_ID=your_workspace_id
+heroku config:set ASANA_DEFAULT_PROJECT_ID=your_project_id
+```
 
 **Bot Commands:**
 - `/create-task name:"Task name" project:"Project ID"`
