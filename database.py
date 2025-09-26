@@ -31,6 +31,7 @@ class Guild(Base):
     task_templates = relationship("TaskTemplate", back_populates="guild", cascade="all, delete-orphan")
     time_entries = relationship("TimeEntry", back_populates="guild", cascade="all, delete-orphan")
     timeclock_channels = relationship("TimeclockChannel", back_populates="guild", cascade="all, delete-orphan")
+    saved_searches = relationship("SavedSearch", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -204,6 +205,34 @@ class TimeEntry(Base):
 
     # Relationships
     guild = relationship("Guild", back_populates="time_entries")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class SavedSearch(Base):
+    """Saved task search configurations."""
+    __tablename__ = 'saved_searches'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    name = Column(String(255), nullable=False)  # Search name (e.g., "My Open Tasks")
+    description = Column(Text)  # Search description
+    search_query = Column(String(500))  # Text search query
+    assignee_user_id = Column(BigInteger, nullable=True)  # Discord user ID filter
+    assignee_asana_id = Column(String(255), nullable=True)  # Asana user ID filter
+    project_id = Column(String(255), nullable=True)  # Asana project ID filter
+    status_filter = Column(String(50), nullable=True)  # Status filter (completed, incomplete, etc.)
+    due_date_filter = Column(String(50), nullable=True)  # Due date filter (overdue, today, week, etc.)
+    sort_by = Column(String(50), default='created_at')  # Sort field
+    sort_order = Column(String(10), default='desc')  # Sort order (asc, desc)
+    max_results = Column(Integer, default=10)  # Maximum results to return
+    is_active = Column(Boolean, default=True)  # Whether search is available
+    usage_count = Column(Integer, default=0)  # How many times search has been used
+    created_by = Column(BigInteger, nullable=False)  # Discord user who created it
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="saved_searches")
 
     __table_args__ = {'sqlite_autoincrement': True}
 
@@ -811,6 +840,115 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting active entries: {e}")
             return []
+
+    def create_saved_search(self, guild_id: int, name: str, created_by: int, **search_params) -> bool:
+        """Create a new saved search."""
+        try:
+            with self.get_session() as session:
+                search = SavedSearch(
+                    guild_id=guild_id,
+                    name=name,
+                    created_by=created_by,
+                    **search_params
+                )
+                session.add(search)
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error creating saved search: {e}")
+            return False
+
+    def get_saved_searches(self, guild_id: int, active_only: bool = True) -> list:
+        """Get all saved searches for a guild."""
+        try:
+            with self.get_session() as session:
+                query = session.query(SavedSearch).filter(SavedSearch.guild_id == guild_id)
+                if active_only:
+                    query = query.filter(SavedSearch.is_active == True)
+                searches = query.order_by(SavedSearch.name).all()
+
+                return [{
+                    'id': s.id,
+                    'name': s.name,
+                    'description': s.description,
+                    'search_query': s.search_query,
+                    'assignee_user_id': s.assignee_user_id,
+                    'assignee_asana_id': s.assignee_asana_id,
+                    'project_id': s.project_id,
+                    'status_filter': s.status_filter,
+                    'due_date_filter': s.due_date_filter,
+                    'sort_by': s.sort_by,
+                    'sort_order': s.sort_order,
+                    'max_results': s.max_results,
+                    'is_active': s.is_active,
+                    'usage_count': s.usage_count,
+                    'created_by': s.created_by,
+                    'created_at': s.created_at,
+                    'updated_at': s.updated_at
+                } for s in searches]
+        except Exception as e:
+            print(f"Error getting saved searches: {e}")
+            return []
+
+    def get_saved_search(self, search_id: int) -> Optional[Dict[str, Any]]:
+        """Get a specific saved search by ID."""
+        try:
+            with self.get_session() as session:
+                search = session.query(SavedSearch).filter(SavedSearch.id == search_id).first()
+                if search:
+                    return {
+                        'id': search.id,
+                        'guild_id': search.guild_id,
+                        'name': search.name,
+                        'description': search.description,
+                        'search_query': search.search_query,
+                        'assignee_user_id': search.assignee_user_id,
+                        'assignee_asana_id': search.assignee_asana_id,
+                        'project_id': search.project_id,
+                        'status_filter': search.status_filter,
+                        'due_date_filter': search.due_date_filter,
+                        'sort_by': search.sort_by,
+                        'sort_order': search.sort_order,
+                        'max_results': search.max_results,
+                        'is_active': search.is_active,
+                        'usage_count': search.usage_count,
+                        'created_by': search.created_by,
+                        'created_at': search.created_at,
+                        'updated_at': search.updated_at
+                    }
+                return None
+        except Exception as e:
+            print(f"Error getting saved search: {e}")
+            return None
+
+    def update_saved_search_usage(self, search_id: int) -> bool:
+        """Increment the usage count for a saved search."""
+        try:
+            with self.get_session() as session:
+                search = session.query(SavedSearch).filter(SavedSearch.id == search_id).first()
+                if search:
+                    search.usage_count += 1
+                    search.updated_at = datetime.utcnow()
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error updating search usage: {e}")
+            return False
+
+    def delete_saved_search(self, search_id: int) -> bool:
+        """Delete a saved search."""
+        try:
+            with self.get_session() as session:
+                search = session.query(SavedSearch).filter(SavedSearch.id == search_id).first()
+                if search:
+                    session.delete(search)
+                    session.commit()
+                    return True
+                return False
+        except Exception as e:
+            print(f"Error deleting saved search: {e}")
+            return False
 
 # Global database manager instance
 db_manager = DatabaseManager()

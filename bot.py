@@ -1581,6 +1581,16 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="🔍 Advanced Search",
+        value="""`search-tasks` - Search tasks with advanced filters
+`save-search` - Save search configurations for reuse
+`load-search` - Run a previously saved search
+`list-searches` - Browse all saved searches
+`delete-search` - Delete saved searches""",
+        inline=False
+    )
+
+    embed.add_field(
         name="🕐 Time Tracking",
         value="""`clock-in` - Start tracking work time
 `clock-out` - End session with time proof link
@@ -2739,6 +2749,763 @@ async def set_timeclock_channel_error(interaction: discord.Interaction, error):
             await interaction.followup.send(embed=embed)
     else:
         logger.error(f"Set timeclock channel error: {error}")
+
+@bot.tree.command(name="search-tasks", description="Advanced search for Asana tasks with filters")
+@app_commands.describe(
+    query="Search text in task names and descriptions",
+    assignee="Filter by Discord user assignee",
+    project="Filter by Asana project ID",
+    status="Filter by task status (completed, incomplete)",
+    due_date="Filter by due date (overdue, today, tomorrow, week, month)",
+    sort_by="Sort results by (created_at, modified_at, due_on, name)",
+    sort_order="Sort order (asc, desc)",
+    limit="Maximum results to show (default: 10, max: 25)"
+)
+async def search_tasks_command(
+    interaction: discord.Interaction,
+    query: Optional[str] = None,
+    assignee: Optional[discord.Member] = None,
+    project: Optional[str] = None,
+    status: Optional[str] = None,
+    due_date: Optional[str] = None,
+    sort_by: Optional[str] = "created_at",
+    sort_order: Optional[str] = "desc",
+    limit: Optional[int] = 10
+):
+    """Advanced search for Asana tasks with comprehensive filtering."""
+    await interaction.response.defer()
+
+    try:
+        # Validate parameters
+        if limit > 25:
+            limit = 25
+        elif limit < 1:
+            limit = 1
+
+        if sort_by not in ['created_at', 'modified_at', 'due_on', 'name']:
+            sort_by = 'created_at'
+
+        if sort_order not in ['asc', 'desc']:
+            sort_order = 'desc'
+
+        if status and status not in ['completed', 'incomplete']:
+            embed = discord.Embed(
+                title="❌ Invalid Status",
+                description="Status must be either 'completed' or 'incomplete'",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        if due_date and due_date not in ['overdue', 'today', 'tomorrow', 'week', 'month']:
+            embed = discord.Embed(
+                title="❌ Invalid Due Date Filter",
+                description="Due date filter must be: overdue, today, tomorrow, week, or month",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Resolve assignee to Asana user ID
+        assignee_asana_id = None
+        assignee_display = None
+        if assignee:
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
+            if user_mapping:
+                assignee_asana_id = user_mapping['asana_user_id']
+                assignee_display = f"{assignee.mention}"
+            else:
+                embed = discord.Embed(
+                    title="⚠️ User Not Mapped",
+                    description=f"{assignee.mention} is not mapped to an Asana user. Search will exclude assignee filter.",
+                    color=discord.Color.yellow()
+                )
+                await interaction.followup.send(embed=embed)
+
+        # Build search parameters for Asana API
+        search_params = {}
+
+        # Add text query if provided
+        if query:
+            search_params['text'] = query
+
+        # Add assignee filter
+        if assignee_asana_id:
+            search_params['assignee'] = assignee_asana_id
+
+        # Add project filter
+        if project:
+            search_params['projects'] = [project]
+
+        # Add status filter
+        if status:
+            search_params['completed'] = status == 'completed'
+
+        # Add due date filters
+        if due_date:
+            today = datetime.now().date()
+            if due_date == 'overdue':
+                search_params['due_on.before'] = str(today)
+                search_params['completed'] = False
+            elif due_date == 'today':
+                search_params['due_on'] = str(today)
+            elif due_date == 'tomorrow':
+                tomorrow = today + timedelta(days=1)
+                search_params['due_on'] = str(tomorrow)
+            elif due_date == 'week':
+                week_end = today + timedelta(days=7)
+                search_params['due_on.before'] = str(week_end + timedelta(days=1))
+                search_params['due_on.after'] = str(today - timedelta(days=1))
+            elif due_date == 'month':
+                month_end = today + timedelta(days=30)
+                search_params['due_on.before'] = str(month_end + timedelta(days=1))
+                search_params['due_on.after'] = str(today - timedelta(days=1))
+
+        # Add sorting
+        search_params['sort_by'] = sort_by
+        search_params['sort_ascending'] = sort_order == 'asc'
+
+        # Limit results
+        search_params['limit'] = limit
+
+        # Perform the search
+        try:
+            tasks = asana_client.tasks.search_tasks(search_params)
+            tasks_list = list(tasks)
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "search-tasks")
+            embed = discord.Embed(
+                title="❌ Search Failed",
+                description=f"Failed to search Asana tasks: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Create results embed
+        embed = discord.Embed(
+            title="🔍 Task Search Results",
+            description=f"Found {len(tasks_list)} task{'s' if len(tasks_list) != 1 else ''}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        # Add search criteria
+        criteria = []
+        if query:
+            criteria.append(f"Query: `{query}`")
+        if assignee_display:
+            criteria.append(f"Assignee: {assignee_display}")
+        if project:
+            criteria.append(f"Project: `{project}`")
+        if status:
+            criteria.append(f"Status: {status}")
+        if due_date:
+            criteria.append(f"Due: {due_date}")
+        criteria.append(f"Sort: {sort_by} ({sort_order})")
+        criteria.append(f"Limit: {limit}")
+
+        if criteria:
+            embed.add_field(
+                name="📋 Search Criteria",
+                value="\n".join(criteria),
+                inline=False
+            )
+
+        # Add results
+        if tasks_list:
+            for i, task in enumerate(tasks_list[:10], 1):  # Limit to 10 in embed
+                task_info = f"**{task['name']}**\n"
+                task_info += f"ID: `{task['gid']}`\n"
+
+                if task.get('assignee'):
+                    task_info += f"👤 {task['assignee']['name']}\n"
+
+                if task.get('due_on'):
+                    due_date_obj = datetime.fromisoformat(task['due_on']).date()
+                    today = datetime.now().date()
+                    if due_date_obj < today:
+                        task_info += f"📅 ⚠️ {task['due_on']} (Overdue)\n"
+                    elif due_date_obj == today:
+                        task_info += f"📅 📍 Today ({task['due_on']})\n"
+                    else:
+                        task_info += f"📅 {task['due_on']}\n"
+
+                if task.get('completed'):
+                    task_info += "✅ Completed"
+                else:
+                    task_info += "⏳ Incomplete"
+
+                embed.add_field(
+                    name=f"{i}. {task['name'][:50]}{'...' if len(task['name']) > 50 else ''}",
+                    value=task_info,
+                    inline=False
+                )
+
+            if len(tasks_list) > 10:
+                embed.set_footer(text=f"Showing first 10 of {len(tasks_list)} results")
+
+        else:
+            embed.add_field(
+                name="📭 No Results",
+                value="No tasks found matching your search criteria.",
+                inline=False
+            )
+
+            embed.add_field(
+                name="💡 Tips",
+                value="• Try broader search terms\n• Check your project ID\n• Verify user mappings\n• Adjust date filters",
+                inline=False
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "search-tasks")
+
+        embed = discord.Embed(
+            title="❌ Search Failed",
+            description=f"An error occurred while searching: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="save-search", description="Save a task search configuration for quick reuse")
+@app_commands.describe(
+    name="Name for your saved search (e.g., 'My Overdue Tasks')",
+    description="Optional description of what this search does",
+    query="Search text in task names and descriptions",
+    assignee="Filter by Discord user assignee",
+    project="Filter by Asana project ID",
+    status="Filter by task status (completed, incomplete)",
+    due_date="Filter by due date (overdue, today, tomorrow, week, month)",
+    sort_by="Sort results by (created_at, modified_at, due_on, name)",
+    sort_order="Sort order (asc, desc)",
+    max_results="Maximum results to show when running this search (default: 10, max: 25)"
+)
+async def save_search_command(
+    interaction: discord.Interaction,
+    name: str,
+    description: Optional[str] = None,
+    query: Optional[str] = None,
+    assignee: Optional[discord.Member] = None,
+    project: Optional[str] = None,
+    status: Optional[str] = None,
+    due_date: Optional[str] = None,
+    sort_by: Optional[str] = "created_at",
+    sort_order: Optional[str] = "desc",
+    max_results: Optional[int] = 10
+):
+    """Save a task search configuration for quick reuse."""
+    await interaction.response.defer()
+
+    try:
+        # Validate parameters
+        if max_results > 25:
+            max_results = 25
+        elif max_results < 1:
+            max_results = 1
+
+        if sort_by not in ['created_at', 'modified_at', 'due_on', 'name']:
+            sort_by = 'created_at'
+
+        if sort_order not in ['asc', 'desc']:
+            sort_order = 'desc'
+
+        if status and status not in ['completed', 'incomplete']:
+            embed = discord.Embed(
+                title="❌ Invalid Status",
+                description="Status must be either 'completed' or 'incomplete'",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        if due_date and due_date not in ['overdue', 'today', 'tomorrow', 'week', 'month']:
+            embed = discord.Embed(
+                title="❌ Invalid Due Date Filter",
+                description="Due date filter must be: overdue, today, tomorrow, week, or month",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Check if search name already exists
+        existing_searches = db_manager.get_saved_searches(interaction.guild.id)
+        if any(s['name'].lower() == name.lower() for s in existing_searches):
+            embed = discord.Embed(
+                title="❌ Search Name Already Exists",
+                description=f"A saved search with the name '{name}' already exists. Please choose a different name.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Resolve assignee to Asana user ID
+        assignee_asana_id = None
+        if assignee:
+            user_mapping = db_manager.get_user_mapping(interaction.guild.id, assignee.id)
+            if user_mapping:
+                assignee_asana_id = user_mapping['asana_user_id']
+            else:
+                embed = discord.Embed(
+                    title="⚠️ User Not Mapped",
+                    description=f"{assignee.mention} is not mapped to an Asana user. The search will be saved without assignee filter.",
+                    color=discord.Color.yellow()
+                )
+                await interaction.followup.send(embed=embed)
+
+        # Create the saved search
+        search_params = {
+            'description': description,
+            'search_query': query,
+            'assignee_user_id': assignee.id if assignee else None,
+            'assignee_asana_id': assignee_asana_id,
+            'project_id': project,
+            'status_filter': status,
+            'due_date_filter': due_date,
+            'sort_by': sort_by,
+            'sort_order': sort_order,
+            'max_results': max_results
+        }
+
+        success = db_manager.create_saved_search(
+            guild_id=interaction.guild.id,
+            name=name,
+            created_by=interaction.user.id,
+            **search_params
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Search Saved",
+                description=f"Search '{name}' has been saved and is ready to use!",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="🔍 Search Name",
+                value=f"`{name}`",
+                inline=True
+            )
+
+            embed.add_field(
+                name="👤 Created By",
+                value=interaction.user.mention,
+                inline=True
+            )
+
+            # Show search criteria
+            criteria = []
+            if query:
+                criteria.append(f"Query: `{query}`")
+            if assignee and assignee_asana_id:
+                criteria.append(f"Assignee: {assignee.mention}")
+            if project:
+                criteria.append(f"Project: `{project}`")
+            if status:
+                criteria.append(f"Status: {status}")
+            if due_date:
+                criteria.append(f"Due: {due_date}")
+            criteria.append(f"Sort: {sort_by} ({sort_order})")
+            criteria.append(f"Max Results: {max_results}")
+
+            if criteria:
+                embed.add_field(
+                    name="📋 Search Criteria",
+                    value="\n".join(criteria),
+                    inline=False
+                )
+
+            embed.add_field(
+                name="🚀 How to Use",
+                value=f"Use `/load-search search:\"{name}\"` to run this search",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+
+            # Log search creation
+            await error_logger.log_system_event(
+                "search_saved",
+                f"Saved search '{name}' created by {interaction.user.display_name}",
+                {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "search_name": name},
+                "INFO"
+            )
+
+        else:
+            embed = discord.Embed(
+                title="❌ Save Failed",
+                description="Failed to save the search configuration. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "save-search")
+
+        embed = discord.Embed(
+            title="❌ Save Failed",
+            description=f"An error occurred while saving the search: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="load-search", description="Run a previously saved task search")
+@app_commands.describe(
+    search="Name of the saved search to run"
+)
+async def load_search_command(interaction: discord.Interaction, search: str):
+    """Run a previously saved task search."""
+    await interaction.response.defer()
+
+    try:
+        # Find the saved search by name
+        saved_searches = db_manager.get_saved_searches(interaction.guild.id)
+        saved_search = None
+
+        # Try exact match first, then case-insensitive match
+        for s in saved_searches:
+            if s['name'].lower() == search.lower():
+                saved_search = s
+                break
+
+        if not saved_search:
+            embed = discord.Embed(
+                title="❌ Search Not Found",
+                description=f"No saved search found with name '{search}'.",
+                color=discord.Color.red()
+            )
+
+            # Suggest similar searches
+            similar = [s['name'] for s in saved_searches if search.lower() in s['name'].lower()]
+            if similar:
+                embed.add_field(
+                    name="💡 Did you mean?",
+                    value="\n".join(f"• `{name}`" for name in similar[:3]),
+                    inline=False
+                )
+
+            embed.add_field(
+                name="📋 Available Searches",
+                value="Use `/list-searches` to see all available saved searches",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Update usage count
+        db_manager.update_saved_search_usage(saved_search['id'])
+
+        # Build search parameters for Asana API
+        search_params = {}
+
+        # Add text query if provided
+        if saved_search['search_query']:
+            search_params['text'] = saved_search['search_query']
+
+        # Add assignee filter
+        if saved_search['assignee_asana_id']:
+            search_params['assignee'] = saved_search['assignee_asana_id']
+
+        # Add project filter
+        if saved_search['project_id']:
+            search_params['projects'] = [saved_search['project_id']]
+
+        # Add status filter
+        if saved_search['status_filter']:
+            search_params['completed'] = saved_search['status_filter'] == 'completed'
+
+        # Add due date filters
+        if saved_search['due_date_filter']:
+            today = datetime.now().date()
+            if saved_search['due_date_filter'] == 'overdue':
+                search_params['due_on.before'] = str(today)
+                search_params['completed'] = False
+            elif saved_search['due_date_filter'] == 'today':
+                search_params['due_on'] = str(today)
+            elif saved_search['due_date_filter'] == 'tomorrow':
+                tomorrow = today + timedelta(days=1)
+                search_params['due_on'] = str(tomorrow)
+            elif saved_search['due_date_filter'] == 'week':
+                week_end = today + timedelta(days=7)
+                search_params['due_on.before'] = str(week_end + timedelta(days=1))
+                search_params['due_on.after'] = str(today - timedelta(days=1))
+            elif saved_search['due_date_filter'] == 'month':
+                month_end = today + timedelta(days=30)
+                search_params['due_on.before'] = str(month_end + timedelta(days=1))
+                search_params['due_on.after'] = str(today - timedelta(days=1))
+
+        # Add sorting
+        search_params['sort_by'] = saved_search['sort_by']
+        search_params['sort_ascending'] = saved_search['sort_order'] == 'asc'
+
+        # Limit results
+        search_params['limit'] = saved_search['max_results']
+
+        # Perform the search
+        try:
+            tasks = asana_client.tasks.search_tasks(search_params)
+            tasks_list = list(tasks)
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "load-search")
+            embed = discord.Embed(
+                title="❌ Search Failed",
+                description=f"Failed to run saved search: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Create results embed
+        embed = discord.Embed(
+            title=f"🔍 Saved Search: {saved_search['name']}",
+            description=f"Found {len(tasks_list)} task{'s' if len(tasks_list) != 1 else ''}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        if saved_search['description']:
+            embed.add_field(
+                name="📋 Description",
+                value=saved_search['description'],
+                inline=False
+            )
+
+        # Add search criteria
+        criteria = []
+        if saved_search['search_query']:
+            criteria.append(f"Query: `{saved_search['search_query']}`")
+        if saved_search['assignee_user_id']:
+            user = interaction.guild.get_member(saved_search['assignee_user_id'])
+            if user:
+                criteria.append(f"Assignee: {user.mention}")
+        if saved_search['project_id']:
+            criteria.append(f"Project: `{saved_search['project_id']}`")
+        if saved_search['status_filter']:
+            criteria.append(f"Status: {saved_search['status_filter']}")
+        if saved_search['due_date_filter']:
+            criteria.append(f"Due: {saved_search['due_date_filter']}")
+        criteria.append(f"Sort: {saved_search['sort_by']} ({saved_search['sort_order']})")
+        criteria.append(f"Max Results: {saved_search['max_results']}")
+
+        if criteria:
+            embed.add_field(
+                name="📋 Search Criteria",
+                value="\n".join(criteria),
+                inline=False
+            )
+
+        # Add results
+        if tasks_list:
+            for i, task in enumerate(tasks_list[:10], 1):  # Limit to 10 in embed
+                task_info = f"**{task['name']}**\n"
+                task_info += f"ID: `{task['gid']}`\n"
+
+                if task.get('assignee'):
+                    task_info += f"👤 {task['assignee']['name']}\n"
+
+                if task.get('due_on'):
+                    due_date_obj = datetime.fromisoformat(task['due_on']).date()
+                    today = datetime.now().date()
+                    if due_date_obj < today:
+                        task_info += f"📅 ⚠️ {task['due_on']} (Overdue)\n"
+                    elif due_date_obj == today:
+                        task_info += f"📅 📍 Today ({task['due_on']})\n"
+                    else:
+                        task_info += f"📅 {task['due_on']}\n"
+
+                if task.get('completed'):
+                    task_info += "✅ Completed"
+                else:
+                    task_info += "⏳ Incomplete"
+
+                embed.add_field(
+                    name=f"{i}. {task['name'][:50]}{'...' if len(task['name']) > 50 else ''}",
+                    value=task_info,
+                    inline=False
+                )
+
+            if len(tasks_list) > 10:
+                embed.set_footer(text=f"Showing first 10 of {len(tasks_list)} results • Used {saved_search['usage_count'] + 1} times")
+
+        else:
+            embed.add_field(
+                name="📭 No Results",
+                value="No tasks found matching this saved search.",
+                inline=False
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "load-search")
+
+        embed = discord.Embed(
+            title="❌ Search Failed",
+            description=f"An error occurred while running the search: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="list-searches", description="Browse all saved task searches")
+async def list_searches_command(interaction: discord.Interaction):
+    """Browse all saved task searches."""
+    await interaction.response.defer()
+
+    try:
+        saved_searches = db_manager.get_saved_searches(interaction.guild.id)
+
+        if not saved_searches:
+            embed = discord.Embed(
+                title="🔍 Saved Searches",
+                description="No saved searches have been created for this server yet.",
+                color=discord.Color.blue()
+            )
+
+            embed.add_field(
+                name="🚀 Create Your First Search",
+                value="Use `/save-search` to save common task search configurations",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title="🔍 Saved Task Searches",
+            description=f"Found {len(saved_searches)} saved search{'es' if len(saved_searches) != 1 else ''} for this server",
+            color=discord.Color.blue()
+        )
+
+        for i, search in enumerate(saved_searches[:10], 1):  # Limit to 10 searches in embed
+            search_info = f"**{search['name']}**"
+            if search['description']:
+                search_info += f"\n{search['description'][:100]}{'...' if len(search['description']) > 100 else ''}"
+
+            criteria = []
+            if search['search_query']:
+                criteria.append(f"Query: `{search['search_query'][:30]}{'...' if len(search['search_query']) > 30 else ''}`")
+            if search['assignee_user_id']:
+                user = interaction.guild.get_member(search['assignee_user_id'])
+                if user:
+                    criteria.append(f"Assignee: {user.display_name}")
+            if search['project_id']:
+                criteria.append(f"Project: `{search['project_id']}`")
+            if search['status_filter']:
+                criteria.append(f"Status: {search['status_filter']}")
+            if search['due_date_filter']:
+                criteria.append(f"Due: {search['due_date_filter']}")
+            if criteria:
+                search_info += f"\n{' • '.join(criteria[:2])}"
+            if len(criteria) > 2:
+                search_info += f" • +{len(criteria) - 2} more"
+
+            search_info += f"\n📊 Used {search['usage_count']} time{'s' if search['usage_count'] != 1 else ''}"
+
+            embed.add_field(
+                name=f"{i}. {search['name']}",
+                value=search_info,
+                inline=False
+            )
+
+        embed.add_field(
+            name="🚀 How to Use",
+            value="Use `/load-search search:\"Search Name\"` to run any saved search",
+            inline=False
+        )
+
+        if len(saved_searches) > 10:
+            embed.set_footer(text=f"Showing first 10 searches. Total: {len(saved_searches)}")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "list-searches")
+
+        embed = discord.Embed(
+            title="❌ Failed to Load Searches",
+            description=f"Could not load saved searches: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="delete-search", description="Delete a saved task search")
+@app_commands.describe(
+    search="Name of the saved search to delete"
+)
+async def delete_search_command(interaction: discord.Interaction, search: str):
+    """Delete a saved task search."""
+    await interaction.response.defer()
+
+    try:
+        # Find the saved search by name
+        saved_searches = db_manager.get_saved_searches(interaction.guild.id, active_only=False)
+        target_search = None
+        search_id = None
+
+        for s in saved_searches:
+            if s['name'].lower() == search.lower():
+                target_search = s
+                search_id = s['id']
+                break
+
+        if not target_search:
+            embed = discord.Embed(
+                title="❌ Search Not Found",
+                description=f"No saved search found with name '{search}'.",
+                color=discord.Color.red()
+            )
+
+            embed.add_field(
+                name="📋 Available Searches",
+                value="Use `/list-searches` to see all available saved searches",
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Check if user created this search or is admin
+        is_admin = interaction.user.guild_permissions.administrator
+        is_creator = target_search['created_by'] == interaction.user.id
+
+        if not (is_admin or is_creator):
+            embed = discord.Embed(
+                title="❌ Permission Denied",
+                description="You can only delete searches that you created, or ask an administrator to delete it.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Confirm deletion
+        embed = discord.Embed(
+            title="🗑️ Confirm Search Deletion",
+            description=f"Are you sure you want to delete the saved search **{target_search['name']}**?",
+            color=discord.Color.orange()
+        )
+
+        embed.add_field(
+            name="⚠️ This action cannot be undone",
+            value=f"This search has been used {target_search['usage_count']} time{'s' if target_search['usage_count'] != 1 else ''}.",
+            inline=False
+        )
+
+        view = SearchDeletionView(search_id, target_search['name'], interaction)
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "delete-search")
+
+        embed = discord.Embed(
+            title="❌ Deletion Failed",
+            description=f"Failed to delete search: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="create-template", description="Create a reusable task template")
 @app_commands.describe(
@@ -5663,6 +6430,96 @@ class TemplateDeletionView(discord.ui.View):
         timeout_embed = discord.Embed(
             title="⏰ Deletion Timed Out",
             description="The template deletion confirmation has expired. The template was not deleted.",
+            color=discord.Color.yellow()
+        )
+
+        try:
+            await self.message.edit(embed=timeout_embed, view=self)
+        except:
+            pass  # Message might have been deleted
+
+# Search Deletion Confirmation View
+class SearchDeletionView(discord.ui.View):
+    """View for confirming search deletion."""
+
+    def __init__(self, search_id, search_name, interaction):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.search_id = search_id
+        self.search_name = search_name
+        self.interaction = interaction
+
+    @discord.ui.button(label="🗑️ Delete Search", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Confirm search deletion."""
+        try:
+            # Disable buttons
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            # Delete the search
+            success = db_manager.delete_saved_search(self.search_id)
+
+            if success:
+                embed = discord.Embed(
+                    title="✅ Search Deleted",
+                    description=f"Saved search **{self.search_name}** has been permanently deleted.",
+                    color=discord.Color.green()
+                )
+
+                embed.set_footer(text="This action cannot be undone")
+
+                await interaction.followup.send(embed=embed)
+
+                # Log search deletion
+                await error_logger.log_system_event(
+                    "search_deleted",
+                    f"Saved search '{self.search_name}' deleted by {interaction.user.display_name}",
+                    {"user_id": interaction.user.id, "guild_id": interaction.guild.id, "search_name": self.search_name},
+                    "WARNING"
+                )
+            else:
+                embed = discord.Embed(
+                    title="❌ Deletion Failed",
+                    description="Failed to delete the search. It may have already been deleted.",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            await error_logger.log_command_error(interaction, e, "confirm_search_deletion")
+
+            error_embed = discord.Embed(
+                title="❌ Deletion Failed",
+                description=f"An error occurred while deleting the search: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel search deletion."""
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        cancel_embed = discord.Embed(
+            title="❌ Deletion Cancelled",
+            description="The search deletion has been cancelled.",
+            color=discord.Color.grey()
+        )
+        await interaction.followup.send(embed=cancel_embed)
+
+    async def on_timeout(self):
+        """Handle when the view times out."""
+        # Disable all components
+        for item in self.children:
+            item.disabled = True
+
+        timeout_embed = discord.Embed(
+            title="⏰ Deletion Timed Out",
+            description="The search deletion confirmation has expired. The search was not deleted.",
             color=discord.Color.yellow()
         )
 

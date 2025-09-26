@@ -11,6 +11,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - **🤖 AI-Powered Natural Language** - Create tasks using conversational language
 - **⚙️ Bulk Operations** - Select and operate on multiple tasks at once
 - **📋 Task Templates** - Save and reuse common task configurations
+- **🔍 Advanced Search** - Filter and save task searches with powerful criteria
 - **🕐 Time Tracking** - Virtual assistant clock in/out with time proof validation
 - **🔔 Smart Notifications** - Personalized due date reminders and assignment alerts
 - Secure environment variable handling
@@ -72,6 +73,13 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/list-templates` - Browse available task templates
 - `/use-template template:"Bug Report" custom_name:"🐛 Login issue"` - Create tasks from saved templates
 - `/delete-template template:"Bug Report"` - Remove templates (Admin only)
+
+### 🔍 Advanced Search
+- `/search-tasks query:"bug" assignee:@user status:incomplete due_date:week` - Advanced task search with filters
+- `/save-search name:"My Tasks" assignee:@me status:incomplete` - Save search configurations
+- `/load-search search:"My Tasks"` - Run previously saved searches
+- `/list-searches` - Browse all available saved searches
+- `/delete-search search:"My Tasks"` - Delete saved searches
 
 ### 🕐 Time Tracking
 - `/clock-in` - Start tracking work time
@@ -306,6 +314,92 @@ Templates track usage statistics:
 - Support tickets
 - Recurring tasks
 - Department workflows
+
+## 🔍 Advanced Search System
+
+Powerful task search capabilities with comprehensive filtering, sorting, and saveable configurations.
+
+### One-Time Advanced Search
+
+Use `/search-tasks` for immediate searches with multiple filter criteria:
+
+```
+/search-tasks query:"bug fix" assignee:@developer status:incomplete due_date:week sort_by:created_at limit:15
+```
+
+**Available Filters:**
+- **query**: Text search in task names and descriptions
+- **assignee**: Filter by Discord user (must be mapped to Asana)
+- **project**: Filter by Asana project ID
+- **status**: `completed` or `incomplete`
+- **due_date**: `overdue`, `today`, `tomorrow`, `week`, `month`
+- **sort_by**: `created_at`, `modified_at`, `due_on`, `name`
+- **sort_order**: `asc` or `desc`
+- **limit**: Maximum results (1-25, default 10)
+
+### Saved Searches
+
+Save commonly used search configurations for quick reuse:
+
+**`/save-search`** - Create a reusable search configuration
+```
+/save-search name:"My Overdue Tasks" description:"Tasks assigned to me that are overdue" assignee:@me status:incomplete due_date:overdue sort_by:due_on sort_order:asc max_results:20
+```
+
+**`/load-search`** - Run a previously saved search
+```
+/load-search search:"My Overdue Tasks"
+```
+
+**`/list-searches`** - Browse all available saved searches
+```
+/list-searches
+```
+
+**`/delete-search`** - Remove saved searches (creator or admin only)
+```
+/delete-search search:"My Overdue Tasks"
+```
+
+### Search Results
+
+All search results display:
+- **Task Name & ID**: Clickable task identifiers
+- **Assignee**: Current task assignee
+- **Due Date**: With overdue/today indicators
+- **Status**: Completed or incomplete
+- **Search Criteria**: Shows what filters were applied
+
+### Advanced Features
+
+- **Smart Date Filtering**: Relative dates (today, week, month) automatically calculated
+- **User Mapping**: Discord users automatically resolved to Asana users
+- **Usage Tracking**: Saved searches track how often they're used
+- **Permission Control**: Users can only delete searches they created (admins can delete any)
+- **Result Limiting**: Prevent overwhelming responses with configurable limits
+
+### Use Cases
+
+**For Managers:**
+- "All overdue tasks in my department"
+- "Tasks assigned to specific team members"
+- "High-priority items due this week"
+
+**For Individual Contributors:**
+- "My incomplete tasks due today"
+- "Tasks I've been assigned this month"
+- "Bug reports I've filed"
+
+**For Teams:**
+- "All tasks in our current sprint"
+- "Support tickets awaiting response"
+- "Feature requests from this quarter"
+
+**Saved searches enable:**
+- **Quick Access**: One-click access to frequently needed views
+- **Consistency**: Standardized search criteria across team members
+- **Productivity**: Eliminate repetitive search configuration
+- **Monitoring**: Track usage patterns of different search types
 
 ## 🕐 Time Tracking System
 
