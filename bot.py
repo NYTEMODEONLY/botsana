@@ -110,7 +110,8 @@ class AsanaManager:
 
     async def create_task(self, name: str, project_id: Optional[str] = None,
                          assignee: Optional[str] = None, due_date: Optional[str] = None,
-                         notes: Optional[str] = None, guild_id: Optional[int] = None) -> Dict[str, Any]:
+                         notes: Optional[str] = None, guild_id: Optional[int] = None,
+                         created_by_user: Optional[discord.User] = None) -> Dict[str, Any]:
         """Create a new task in Asana."""
         try:
             # Use default project if none specified
@@ -144,6 +145,27 @@ class AsanaManager:
             # Create the task
             result = self.client.tasks.create_task(task_data)
             logger.info(f"Created task: {result['gid']} - {result['name']}")
+
+            # Log history entry
+            if guild_id:
+                change_description = f"Created task '{name}'"
+                if assignee:
+                    change_description += f" assigned to user"
+                if due_date:
+                    change_description += f" with due date {due_date}"
+                if notes:
+                    change_description += f" and notes"
+
+                db_manager.add_task_history_entry(
+                    guild_id=guild_id,
+                    asana_task_gid=result['gid'],
+                    task_name=name,
+                    change_type='created',
+                    changed_by_user_id=created_by_user.id if created_by_user else None,
+                    changed_by_username=str(created_by_user) if created_by_user else None,
+                    change_description=change_description
+                )
+
             return result
 
         except Exception as e:
@@ -152,9 +174,18 @@ class AsanaManager:
 
     async def update_task(self, task_id: str, name: Optional[str] = None,
                          assignee: Optional[str] = None, due_date: Optional[str] = None,
-                         notes: Optional[str] = None, completed: Optional[bool] = None) -> Dict[str, Any]:
+                         notes: Optional[str] = None, completed: Optional[bool] = None,
+                         guild_id: Optional[int] = None, updated_by_user: Optional[discord.User] = None) -> Dict[str, Any]:
         """Update an existing task."""
         try:
+            # Get current task state for history tracking
+            current_task = None
+            if guild_id:
+                try:
+                    current_task = self.client.tasks.get_task(task_id)
+                except:
+                    pass
+
             # Prepare update data
             update_data = {}
 
@@ -175,18 +206,81 @@ class AsanaManager:
             # Update the task
             result = self.client.tasks.update_task(task_id, update_data)
             logger.info(f"Updated task: {task_id}")
+
+            # Log history entries for each field change
+            if guild_id and current_task:
+                task_name = result.get('name') or current_task.get('name', 'Unknown Task')
+
+                for field, new_value in update_data.items():
+                    if field in ['name', 'assignee', 'due_on', 'notes', 'completed']:
+                        # Get old value
+                        old_value = current_task.get(field)
+                        if field == 'assignee' and old_value:
+                            old_value = old_value.get('gid')
+                        if field == 'completed' and old_value is None:
+                            old_value = False
+
+                        # Only log if value actually changed
+                        if str(old_value) != str(new_value):
+                            field_name = field
+                            if field == 'due_on':
+                                field_name = 'due_date'
+                            elif field == 'assignee':
+                                field_name = 'assignee'
+
+                            change_desc = f"Updated {field_name.replace('_', ' ')}"
+
+                            db_manager.add_task_history_entry(
+                                guild_id=guild_id,
+                                asana_task_gid=task_id,
+                                task_name=task_name,
+                                change_type='updated',
+                                field_changed=field_name,
+                                old_value=str(old_value) if old_value else None,
+                                new_value=str(new_value) if new_value else None,
+                                changed_by_user_id=updated_by_user.id if updated_by_user else None,
+                                changed_by_username=str(updated_by_user) if updated_by_user else None,
+                                change_description=change_desc
+                            )
+
             return result
 
         except Exception as e:
             logger.error(f"Error updating task {task_id}: {e}")
             raise
 
-    async def complete_task(self, task_id: str) -> Dict[str, Any]:
+    async def complete_task(self, task_id: str, guild_id: Optional[int] = None, completed_by_user: Optional[discord.User] = None) -> Dict[str, Any]:
         """Mark a task as completed."""
         try:
+            # Get current task state for history tracking
+            current_task = None
+            if guild_id:
+                try:
+                    current_task = self.client.tasks.get_task(task_id)
+                except:
+                    pass
+
             # Mark task as completed
             result = self.client.tasks.update_task(task_id, {'completed': True})
             logger.info(f"Completed task: {task_id}")
+
+            # Log history entry
+            if guild_id and current_task and not current_task.get('completed', False):
+                task_name = result.get('name') or current_task.get('name', 'Unknown Task')
+
+                db_manager.add_task_history_entry(
+                    guild_id=guild_id,
+                    asana_task_gid=task_id,
+                    task_name=task_name,
+                    change_type='completed',
+                    field_changed='completed',
+                    old_value='False',
+                    new_value='True',
+                    changed_by_user_id=completed_by_user.id if completed_by_user else None,
+                    changed_by_username=str(completed_by_user) if completed_by_user else None,
+                    change_description="Marked task as completed"
+                )
+
             return result
 
         except Exception as e:
@@ -962,7 +1056,8 @@ async def create_task_command(
             assignee=asana_assignee,
             due_date=due_date,
             notes=notes,
-            guild_id=interaction.guild.id
+            guild_id=interaction.guild.id,
+            created_by_user=interaction.user
         )
 
         embed = discord.Embed(
@@ -1150,7 +1245,9 @@ async def update_task_command(
             name=name,
             assignee=asana_assignee,
             due_date=due_date,
-            notes=notes
+            notes=notes,
+            guild_id=interaction.guild.id,
+            updated_by_user=interaction.user
         )
 
         embed = discord.Embed(
@@ -1266,7 +1363,7 @@ async def complete_task_command(
             task_id = task_data.get('gid', task_data.get('id'))
 
         # Complete the task
-        completed_task = await asana_manager.complete_task(task_id)
+        completed_task = await asana_manager.complete_task(task_id, guild_id=interaction.guild.id, completed_by_user=interaction.user)
 
         embed = discord.Embed(
             title="✅ Task Completed",
@@ -1558,6 +1655,16 @@ async def help_command(interaction: discord.Interaction):
 `view-task` - View task details
 `list-tasks` - List tasks from a project
 `delete-task` - Delete tasks""",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📋 Task History & Audit Trail",
+        value="""`task-history` - View complete change history for a specific task
+`recent-changes` - See recent changes across all tasks
+• Track who made changes and when
+• View field-by-field change details
+• Monitor task progress over time""",
         inline=False
     )
 
@@ -3972,6 +4079,229 @@ async def delete_dashboard_command(interaction: discord.Interaction, dashboard: 
         )
         await interaction.followup.send(embed=embed)
 
+@bot.tree.command(name="task-history", description="View the complete audit trail of changes for a task")
+@app_commands.describe(
+    task="Task name or ID to view history for",
+    limit="Number of recent changes to show (default: 10, max: 25)"
+)
+async def task_history_command(interaction: discord.Interaction, task: str, limit: Optional[int] = 10):
+    """View the complete audit trail of changes for a task."""
+    await interaction.response.defer()
+
+    try:
+        # Validate limit
+        if limit > 25:
+            limit = 25
+        elif limit < 1:
+            limit = 1
+
+        # Find the task by name or ID
+        try:
+            # First try to find by ID
+            task_info = asana_client.tasks.get_task(task)
+            task_gid = task
+        except:
+            # If not found by ID, search by name
+            tasks = asana_client.tasks.find_all({'workspace': ASANA_WORKSPACE_ID, 'text': task, 'limit': 5})
+            tasks_list = list(tasks)
+
+            if not tasks_list:
+                embed = discord.Embed(
+                    title="❌ Task Not Found",
+                    description=f"No task found with name or ID '{task}'.",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            if len(tasks_list) > 1:
+                embed = discord.Embed(
+                    title="🤔 Multiple Tasks Found",
+                    description=f"Found {len(tasks_list)} tasks matching '{task}'. Please use the task ID instead:",
+                    color=discord.Color.yellow()
+                )
+
+                for i, t in enumerate(tasks_list[:5], 1):
+                    embed.add_field(
+                        name=f"{i}. {t['name']}",
+                        value=f"ID: `{t['gid']}`",
+                        inline=False
+                    )
+
+                await interaction.followup.send(embed=embed)
+                return
+
+            task_info = tasks_list[0]
+            task_gid = task_info['gid']
+
+        # Get task history from database
+        history_entries = db_manager.get_task_history(interaction.guild.id, task_gid, limit=limit)
+
+        embed = discord.Embed(
+            title=f"📋 Task History: {task_info['name']}",
+            description=f"Showing last {len(history_entries)} change{'s' if len(history_entries) != 1 else ''}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        embed.add_field(
+            name="🎯 Task Details",
+            value=f"**Name:** {task_info['name']}\n**ID:** `{task_gid}`",
+            inline=False
+        )
+
+        if history_entries:
+            for i, entry in enumerate(history_entries, 1):
+                # Format the timestamp
+                timestamp = entry['created_at']
+                time_str = f"<t:{int(timestamp.timestamp())}:F>"
+
+                # Format the change description
+                if entry['change_type'] == 'created':
+                    change_icon = "🆕"
+                    change_desc = "Task created"
+                elif entry['change_type'] == 'completed':
+                    change_icon = "✅"
+                    change_desc = "Task completed"
+                elif entry['change_type'] == 'updated':
+                    change_icon = "📝"
+                    if entry['field_changed']:
+                        change_desc = f"Updated {entry['field_changed'].replace('_', ' ')}"
+                    else:
+                        change_desc = "Task updated"
+                elif entry['change_type'] == 'deleted':
+                    change_icon = "🗑️"
+                    change_desc = "Task deleted"
+                else:
+                    change_icon = "🔄"
+                    change_desc = entry['change_type'].title()
+
+                # Add details about the change
+                details = ""
+                if entry['change_description']:
+                    details = entry['change_description']
+                elif entry['field_changed'] and entry['old_value'] and entry['new_value']:
+                    old_val = entry['old_value'][:50] + "..." if len(entry['old_value']) > 50 else entry['old_value']
+                    new_val = entry['new_value'][:50] + "..." if len(entry['new_value']) > 50 else entry['new_value']
+                    details = f"`{old_val}` → `{new_val}`"
+                elif entry['new_value']:
+                    new_val = entry['new_value'][:50] + "..." if len(entry['new_value']) > 50 else entry['new_value']
+                    details = f"Set to: `{new_val}`"
+
+                # Add who made the change
+                changed_by = ""
+                if entry['changed_by_username']:
+                    changed_by = f" by {entry['changed_by_username']}"
+
+                # Format the history entry
+                history_text = f"{change_icon} **{change_desc}**{changed_by}\n"
+                if details:
+                    history_text += f"*{details}*\n"
+                history_text += f"🕐 {time_str}"
+
+                embed.add_field(
+                    name=f"#{i}",
+                    value=history_text,
+                    inline=False
+                )
+
+        else:
+            embed.add_field(
+                name="📭 No History Found",
+                value="No change history found for this task. History tracking may have been added after the task was created.",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Use /recent-changes to see recent changes across all tasks")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "task-history")
+
+        embed = discord.Embed(
+            title="❌ History Error",
+            description=f"Could not load task history: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="recent-changes", description="View recent changes across all tasks")
+@app_commands.describe(
+    limit="Number of recent changes to show (default: 15, max: 25)"
+)
+async def recent_changes_command(interaction: discord.Interaction, limit: Optional[int] = 15):
+    """View recent changes across all tasks."""
+    await interaction.response.defer()
+
+    try:
+        # Validate limit
+        if limit > 25:
+            limit = 25
+        elif limit < 1:
+            limit = 1
+
+        # Get recent changes
+        recent_changes = db_manager.get_recent_task_changes(interaction.guild.id, limit=limit)
+
+        embed = discord.Embed(
+            title="🔄 Recent Task Changes",
+            description=f"Latest {len(recent_changes)} change{'s' if len(recent_changes) != 1 else ''} across all tasks",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        if recent_changes:
+            for i, change in enumerate(recent_changes, 1):
+                # Format change type
+                if change['change_type'] == 'created':
+                    change_icon = "🆕"
+                elif change['change_type'] == 'completed':
+                    change_icon = "✅"
+                elif change['change_type'] == 'updated':
+                    change_icon = "📝"
+                elif change['change_type'] == 'deleted':
+                    change_icon = "🗑️"
+                else:
+                    change_icon = "🔄"
+
+                # Format the change
+                change_text = f"{change_icon} **{change['task_name']}**\n"
+                if change['change_description']:
+                    change_text += f"*{change['change_description']}*\n"
+                else:
+                    change_text += f"*{change['change_type'].title()}*\n"
+
+                change_text += f"👤 {change['changed_by_username'] or 'Unknown'}\n"
+                change_text += f"🕐 <t:{int(change['created_at'].timestamp())}:R>"
+
+                embed.add_field(
+                    name=f"#{i}",
+                    value=change_text,
+                    inline=True
+                )
+
+        else:
+            embed.add_field(
+                name="📭 No Recent Changes",
+                value="No recent task changes found. History tracking may be new to your server.",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Use /task-history \"task name\" to see detailed history for specific tasks")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await error_logger.log_command_error(interaction, e, "recent-changes")
+
+        embed = discord.Embed(
+            title="❌ Error Loading Changes",
+            description=f"Could not load recent changes: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
 @bot.tree.command(name="create-template", description="Create a reusable task template")
 @app_commands.describe(
     name="Template name (e.g., 'Bug Report', 'Feature Request')",
@@ -5653,8 +5983,9 @@ class TaskConfirmationView(discord.ui.View):
                 assignee=self.parsed_task.get('assignee'),
                 due_date=self.parsed_task.get('due_date'),
                 notes=self.parsed_task.get('notes'),
-                guild_id=interaction.guild.id
-            )
+guild_id=interaction.guild.id,
+            created_by_user=interaction.user
+        )
 
             # Success embed
             success_embed = discord.Embed(
@@ -5901,7 +6232,7 @@ class BulkOperationsView(discord.ui.View):
 
             for task_id in self.selected_task_ids:
                 try:
-                    await asana_manager.complete_task(task_id)
+                    await asana_manager.complete_task(task_id, guild_id=self.interaction.guild.id, completed_by_user=self.interaction.user)
                     completed_count += 1
                 except Exception as e:
                     task_name = next((t['name'] for t in self.all_tasks if t.get('gid') == task_id or t.get('id') == task_id), 'Unknown Task')
@@ -6030,7 +6361,7 @@ class BulkReassignmentModal(discord.ui.Modal, title="Bulk Reassign Tasks"):
 
             for task_id in self.selected_task_ids:
                 try:
-                    await asana_manager.update_task(task_id=task_id, assignee=asana_assignee)
+                    await asana_manager.update_task(task_id=task_id, assignee=asana_assignee, guild_id=self.interaction.guild.id, updated_by_user=self.interaction.user)
                     reassigned_count += 1
                 except Exception as e:
                     task_name = next((t['name'] for t in self.all_tasks if t.get('gid') == task_id or t.get('id') == task_id), 'Unknown Task')
@@ -6113,7 +6444,7 @@ class BulkDueDateModal(discord.ui.Modal, title="Bulk Update Due Dates"):
 
             for task_id in self.selected_task_ids:
                 try:
-                    await asana_manager.update_task(task_id=task_id, due_date=due_date_str)
+                    await asana_manager.update_task(task_id=task_id, due_date=due_date_str, guild_id=self.interaction.guild.id, updated_by_user=self.interaction.user)
                     updated_count += 1
                 except Exception as e:
                     task_name = next((t['name'] for t in self.all_tasks if t.get('gid') == task_id or t.get('id') == task_id), 'Unknown Task')
@@ -6679,8 +7010,9 @@ class ChatTaskConfirmationView(discord.ui.View):
                 assignee=self.parsed_task.get('assignee'),
                 due_date=self.parsed_task.get('due_date'),
                 notes=self.parsed_task.get('notes'),
-                guild_id=interaction.guild.id
-            )
+guild_id=interaction.guild.id,
+            created_by_user=interaction.user
+        )
 
             # Success embed
             success_embed = discord.Embed(
@@ -6798,8 +7130,9 @@ class TemplateTaskConfirmationView(discord.ui.View):
                 assignee=self.task_assignee,
                 due_date=self.task_due_date,
                 notes=self.task_notes,
-                guild_id=interaction.guild.id
-            )
+guild_id=interaction.guild.id,
+            created_by_user=interaction.user
+        )
 
             # Update template usage count
             db_manager.update_task_template_usage(self.template_data['id'])

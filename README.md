@@ -8,6 +8,7 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - List tasks from projects
 - Support for slash commands in Discord
 - **Comprehensive Audit System** - Real-time monitoring of ALL Asana activity
+- **📋 Task History & Audit Trail** - Complete change history tracking with who/when/what details
 - **🤖 AI-Powered Natural Language** - Create tasks using conversational language
 - **⚙️ Bulk Operations** - Select and operate on multiple tasks at once
 - **📋 Task Templates** - Save and reuse common task configurations
@@ -62,6 +63,11 @@ A Discord bot that integrates with Asana for task management, allowing you to ma
 - `/view-task task_id` - View task details
 - `/status` - Check comprehensive bot health and status
 - `/help` - Show all commands
+
+### 📋 Task History & Audit Trail
+- `/task-history task:"Task name or ID" limit:10` - View complete change history for a specific task
+- `/recent-changes limit:15` - See recent changes across all tasks in the server
+- **Features**: Track who made changes, when, and what was modified; view field-by-field change details; monitor task progress over time
 
 ### 🤖 AI-Powered Features
 - `@Botsana Create a task to fix the login bug due tomorrow` - Create tasks using natural language in designated chat channel

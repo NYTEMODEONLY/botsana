@@ -41,9 +41,9 @@ Botsana is a minimal, powerful Discord-Asana integration bot that makes task man
 - [ ] **Project Milestones**: Celebrate completed milestones
 
 ### Enhanced Search & Discovery
-- [ ] **Advanced Filtering**: Filter by assignee, project, due date, status
-- [ ] **Saved Searches**: Create and reuse common task queries
-- [ ] **Task History**: View complete audit trail of task changes
+- [x] **Advanced Filtering**: Filter by assignee, project, due date, status
+- [x] **Saved Searches**: Create and reuse common task queries
+- [x] **Task History**: View complete audit trail of task changes
 - [ ] **My Tasks Dashboard**: Personal task overview with quick actions
 
 ---

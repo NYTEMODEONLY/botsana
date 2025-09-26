@@ -33,6 +33,7 @@ class Guild(Base):
     timeclock_channels = relationship("TimeclockChannel", back_populates="guild", cascade="all, delete-orphan")
     saved_searches = relationship("SavedSearch", back_populates="guild", cascade="all, delete-orphan")
     project_dashboards = relationship("ProjectDashboard", back_populates="guild", cascade="all, delete-orphan")
+    task_history = relationship("TaskHistory", back_populates="guild", cascade="all, delete-orphan")
 
 class GuildConfig(Base):
     """Configuration settings for each guild."""
@@ -256,6 +257,29 @@ class ProjectDashboard(Base):
 
     # Relationships
     guild = relationship("Guild", back_populates="project_dashboards")
+
+    __table_args__ = {'sqlite_autoincrement': True}
+
+class TaskHistory(Base):
+    """Task change history for audit trail."""
+    __tablename__ = 'task_history'
+
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, ForeignKey('guilds.id'), nullable=False)
+    asana_task_gid = Column(String(255), nullable=False)  # Asana task GID
+    task_name = Column(String(500), nullable=False)  # Task name at time of change
+    change_type = Column(String(50), nullable=False)  # 'created', 'updated', 'completed', 'deleted', etc.
+    field_changed = Column(String(100), nullable=True)  # 'name', 'assignee', 'due_date', 'notes', etc.
+    old_value = Column(Text, nullable=True)  # Previous value
+    new_value = Column(Text, nullable=True)  # New value
+    changed_by_user_id = Column(BigInteger, nullable=True)  # Discord user who made the change
+    changed_by_username = Column(String(255), nullable=True)  # Username for reference
+    change_description = Column(Text, nullable=True)  # Human-readable description
+    asana_event_id = Column(String(255), nullable=True)  # Asana webhook event ID if applicable
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    guild = relationship("Guild", back_populates="task_history")
 
     __table_args__ = {'sqlite_autoincrement': True}
 
@@ -1074,6 +1098,79 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error deleting project dashboard: {e}")
             return False
+
+    def add_task_history_entry(self, guild_id: int, asana_task_gid: str, task_name: str,
+                             change_type: str, field_changed: str = None,
+                             old_value: str = None, new_value: str = None,
+                             changed_by_user_id: int = None, changed_by_username: str = None,
+                             change_description: str = None, asana_event_id: str = None) -> bool:
+        """Add a new task history entry."""
+        try:
+            with self.get_session() as session:
+                history_entry = TaskHistory(
+                    guild_id=guild_id,
+                    asana_task_gid=asana_task_gid,
+                    task_name=task_name,
+                    change_type=change_type,
+                    field_changed=field_changed,
+                    old_value=old_value,
+                    new_value=new_value,
+                    changed_by_user_id=changed_by_user_id,
+                    changed_by_username=changed_by_username,
+                    change_description=change_description,
+                    asana_event_id=asana_event_id
+                )
+                session.add(history_entry)
+                session.commit()
+                return True
+        except Exception as e:
+            print(f"Error adding task history entry: {e}")
+            return False
+
+    def get_task_history(self, guild_id: int, asana_task_gid: str, limit: int = 20) -> list:
+        """Get the history of changes for a specific task."""
+        try:
+            with self.get_session() as session:
+                history_entries = session.query(TaskHistory).filter(
+                    TaskHistory.guild_id == guild_id,
+                    TaskHistory.asana_task_gid == asana_task_gid
+                ).order_by(TaskHistory.created_at.desc()).limit(limit).all()
+
+                return [{
+                    'id': entry.id,
+                    'change_type': entry.change_type,
+                    'field_changed': entry.field_changed,
+                    'old_value': entry.old_value,
+                    'new_value': entry.new_value,
+                    'changed_by_username': entry.changed_by_username,
+                    'change_description': entry.change_description,
+                    'created_at': entry.created_at
+                } for entry in history_entries]
+        except Exception as e:
+            print(f"Error getting task history: {e}")
+            return []
+
+    def get_recent_task_changes(self, guild_id: int, limit: int = 25) -> list:
+        """Get recent task changes across all tasks."""
+        try:
+            with self.get_session() as session:
+                recent_changes = session.query(TaskHistory).filter(
+                    TaskHistory.guild_id == guild_id
+                ).order_by(TaskHistory.created_at.desc()).limit(limit).all()
+
+                return [{
+                    'id': entry.id,
+                    'asana_task_gid': entry.asana_task_gid,
+                    'task_name': entry.task_name,
+                    'change_type': entry.change_type,
+                    'field_changed': entry.field_changed,
+                    'change_description': entry.change_description,
+                    'changed_by_username': entry.changed_by_username,
+                    'created_at': entry.created_at
+                } for entry in recent_changes]
+        except Exception as e:
+            print(f"Error getting recent task changes: {e}")
+            return []
 
 # Global database manager instance
 db_manager = DatabaseManager()
